@@ -20,13 +20,17 @@ tenacity>=8.3.0
 # XML parsing
 lxml>=5.2.0
 
-# NLP (Phase 2 — install separately to keep MVP lean)
-# transformers>=4.41.0
-# torch>=2.3.0
-# sentence-transformers>=3.0.0
-# scispacy>=0.5.4
-# https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/releases/v0.5.4/en_core_sci_lg-0.5.4.tar.gz
-# https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/releases/v0.5.4/en_ner_bc5cdr_md-0.5.4.tar.gz
+# NLP — Phase 2 embeddings + Phase 4 SPLADE
+transformers>=4.41.0
+torch>=2.3.0
+# scispaCy and the linker models are large — install only when running NER:
+#   pip install scispacy>=0.5.4
+#   pip install https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/releases/v0.5.4/en_core_sci_lg-0.5.4.tar.gz
+#   pip install https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/releases/v0.5.4/en_ner_bc5cdr_md-0.5.4.tar.gz
+# SPLADE (Phase 4) ships via transformers — no extra dep beyond a model checkout
+
+# Graph algorithms — Phase 4 HippoRAG
+networkx>=3.2
 
 # LLM providers (Phase 3 — install as needed)
 # anthropic>=0.28.0

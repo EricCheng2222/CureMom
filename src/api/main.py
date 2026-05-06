@@ -46,6 +46,7 @@ ES_HOST = os.environ.get("ES_HOST", "http://localhost:9200")
 _es: Elasticsearch | None = None
 _retriever: HybridRetriever | None = None
 _mesh_expander: MeSHExpander | None = None
+_embedder: Any = None  # PubMedBERT — loaded lazily on first hybrid query
 
 
 @asynccontextmanager
@@ -135,12 +136,28 @@ async def query(
 
     filter_dict = req.filters.model_dump(exclude_none=False)
     dense_weight = 0.5 if req.options.retrieval_strategy == "hybrid" else 0.0
+    query_embedding: list[float] | None = None
+
+    if dense_weight > 0:
+        try:
+            global _embedder
+            if _embedder is None:
+                from ..embeddings.chunk_pipeline import _Embedder
+                logger.info("Loading PubMedBERT for hybrid retrieval (one-time)…")
+                _embedder = _Embedder()
+            query_embedding = _embedder.encode([req.query])[0]
+        except Exception as exc:
+            logger.warning(
+                "Embedding model unavailable (%s); falling back to BM25-only.", exc,
+            )
+            dense_weight = 0.0
 
     chunks = retriever.retrieve(
         query=req.query,
         filters=filter_dict,
         top_k=req.options.top_k,
         dense_weight=dense_weight,
+        query_embedding=query_embedding,
     )
 
     if not chunks:

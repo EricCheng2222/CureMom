@@ -120,7 +120,25 @@ curl http://localhost:8000/api/v1/ingestion/status
 export PYTHONPATH=$(pwd)
 uvicorn src.api.main:app --reload
 # Docs: http://localhost:8000/docs
+# UI:   http://localhost:8000/
 ```
+
+### 8. (Phase 2 — optional) Generate embeddings for hybrid retrieval
+
+After abstract chunks are populated by the ingestion pipeline, run PubMedBERT
+inference to add 768-dim embeddings to each chunk. Without this, the
+"Hybrid (BM25 + dense)" mode in the UI silently falls back to BM25-only.
+
+```bash
+# Embed all chunks lacking embeddings (uses MPS/CUDA/CPU automatically)
+PYTHONPATH=. python scripts/embed.py --batch-size 32
+
+# After bulk load, build the HNSW index for fast vector search
+PYTHONPATH=. python scripts/embed.py --index-only
+```
+
+The first run downloads `microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract-fulltext`
+(~440 MB) and takes ~1 hour for 33K chunks on M-series Macs (faster on GPU).
 
 ---
 
