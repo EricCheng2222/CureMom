@@ -80,7 +80,7 @@ async function sendConsumerMessage() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         query,
-        options: { top_k: 8, retrieval_strategy: 'bm25', llm_provider: provider, plain_language: simple },
+        options: { top_k: 12, retrieval_strategy: 'bm25', llm_provider: provider, plain_language: simple },
       }),
     });
 
