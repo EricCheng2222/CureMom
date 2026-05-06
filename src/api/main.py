@@ -27,6 +27,8 @@ from pydantic import BaseModel, Field
 from ..search.elasticsearch_client import get_client as get_es_client, ensure_index
 from ..search.hybrid_retriever import HybridRetriever
 from ..search.mesh_expander import MeSHExpander
+from .classifier import classify_query
+from .citation_verifier import verify_citations, warnings_to_dicts
 from .llm_providers import get_provider
 from .response_builder import build_response, response_to_dict
 
@@ -188,6 +190,13 @@ async def query(
     )
     output = response_to_dict(result)
     output["metadata"]["latency_ms"] = int((time.monotonic() - start) * 1000)
+
+    # Classify query and surface citation warnings (informational; never blocks)
+    classification = classify_query(req.query)
+    output["metadata"]["query_type"] = classification.query_type
+    citation_warnings = verify_citations(synthesis.response_text, chunks)
+    if citation_warnings:
+        output["metadata"]["citation_warnings"] = warnings_to_dicts(citation_warnings)
     return output
 
 
@@ -367,6 +376,63 @@ async def stats(db: Annotated[psycopg.Connection, Depends(get_db)]) -> dict:
 @app.get("/api/v1/health")
 async def health() -> dict:
     return {"status": "ok"}
+
+
+@app.get("/api/v1/llm/status")
+async def llm_status() -> dict:
+    """Report which providers are configured and reachable."""
+    import httpx
+
+    out: dict[str, Any] = {
+        "configured_provider": os.environ.get("LLM_PROVIDER", "extractive"),
+        "providers": {},
+    }
+
+    out["providers"]["extractive"] = {"available": True, "model": "extractive"}
+
+    # Ollama: ping /api/tags and report current default model
+    ollama_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+    ollama_model = os.environ.get("OLLAMA_MODEL", "biomistral")
+    try:
+        with httpx.Client(timeout=2.0) as c:
+            r = c.get(f"{ollama_url}/api/tags")
+            installed = [m["name"] for m in r.json().get("models", [])] if r.status_code == 200 else []
+        out["providers"]["ollama"] = {
+            "available": ollama_model in installed or f"{ollama_model}:latest" in installed,
+            "model": ollama_model,
+            "installed_models": installed,
+            "endpoint": ollama_url,
+        }
+    except Exception as exc:
+        out["providers"]["ollama"] = {
+            "available": False, "model": ollama_model, "error": str(exc),
+            "endpoint": ollama_url,
+        }
+
+    out["providers"]["claude"] = {
+        "available": bool(os.environ.get("ANTHROPIC_API_KEY", "").strip()
+                          and os.environ.get("ANTHROPIC_API_KEY") != "your_anthropic_api_key_here"),
+        "model": os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6"),
+    }
+    out["providers"]["openai"] = {
+        "available": bool(os.environ.get("OPENAI_API_KEY", "").strip()
+                          and os.environ.get("OPENAI_API_KEY") != "your_openai_api_key_here"),
+        "model": os.environ.get("OPENAI_MODEL", "gpt-4o"),
+    }
+    return out
+
+
+@app.get("/api/v1/query/classify")
+async def query_classify(q: str = Query(..., min_length=2)) -> dict:
+    """Classify a query without retrieving — useful for UI hints."""
+    c = classify_query(q)
+    return {
+        "query": q,
+        "query_type": c.query_type,
+        "suggested_top_k": c.suggested_top_k,
+        "suggested_provider": c.suggested_provider,
+        "reason": c.reason,
+    }
 
 
 # ── Static files (frontend SPA) ───────────────────────────────────────────────

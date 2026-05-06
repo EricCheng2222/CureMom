@@ -32,9 +32,9 @@ torch>=2.3.0
 # Graph algorithms — Phase 4 HippoRAG
 networkx>=3.2
 
-# LLM providers (Phase 3 — install as needed)
-# anthropic>=0.28.0
-# openai>=1.30.0
+# LLM providers (Phase 3) — install as needed; not auto-imported
+# pip install anthropic>=0.28.0
+# pip install openai>=1.30.0
 
 # Utilities
 python-dotenv>=1.0.0

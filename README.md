@@ -207,14 +207,29 @@ curl -X POST http://localhost:8000/api/v1/query \
   "metadata": {
     "retrieval_strategy": "bm25",
     "model_used": "extractive",
-    "latency_ms": 180
+    "latency_ms": 180,
+    "query_type": "factual",
+    "citation_warnings": []
   }
 }
 ```
 
+`citation_warnings` flags `[N]` markers in the response that:
+- reference an out-of-range chunk (`severity: "invalid"` — usually a hallucination), or
+- have low lexical overlap with the cited chunk (`severity: "weak"` — manually verify).
+
+`query_type` is one of `factual` / `exploratory` / `comparative`. Use
+`GET /api/v1/query/classify?q=…` to classify without retrieving.
+
 ### Other endpoints
 
 ```bash
+# Check which LLM providers are configured / reachable
+curl "http://localhost:8000/api/v1/llm/status"
+
+# Classify a query (factual | exploratory | comparative)
+curl "http://localhost:8000/api/v1/query/classify?q=Is+HCQ+better+than+MTX"
+
 # Search papers
 curl "http://localhost:8000/api/v1/papers/search?q=lupus+nephritis+treatment&pub_year_from=2018"
 
