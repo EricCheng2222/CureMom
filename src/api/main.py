@@ -8,6 +8,13 @@ import time
 from contextlib import asynccontextmanager
 from typing import Annotated, Any
 
+# Load .env BEFORE anything reads os.environ — providers, DSN, etc.
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 import psycopg
 from elasticsearch import Elasticsearch
 from fastapi import Depends, FastAPI, HTTPException, Query

@@ -144,7 +144,16 @@ class OllamaProvider(LLMProvider):
 
         with httpx.Client(timeout=120) as client:
             response = client.post(f"{self._base_url}/api/chat", json=payload)
-            response.raise_for_status()
+            if response.status_code != 200:
+                # Surface Ollama's actual error message (e.g. "model 'X' not found")
+                try:
+                    detail = response.json().get("error", response.text)
+                except Exception:
+                    detail = response.text
+                raise RuntimeError(
+                    f"Ollama {response.status_code}: {detail} "
+                    f"(model={self._model!r}; check `ollama list`)"
+                )
             data = response.json()
 
         raw = data["message"]["content"]
