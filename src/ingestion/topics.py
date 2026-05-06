@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Topic definitions for targeted PubMed ingestion.
 
 Design principle: first-principles, mechanism-first. Topics are organized into

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Molecular targets relevant to the conditions we study.
 
 These targets define the biology — they are NOT assumptions about what treats

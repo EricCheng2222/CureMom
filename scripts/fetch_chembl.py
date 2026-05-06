@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+from __future__ import annotations
+
 """Fetch compound-target data from ChEMBL and queue PubMed papers for ingestion.
 
 Workflow:
