@@ -28,6 +28,13 @@ from tenacity import (
 from .pubmed_parser import ParsedPaper, parse_pubmed_xml_batch
 from .topics import IngestionTopic
 
+try:
+    from elasticsearch import Elasticsearch
+    from ..search.elasticsearch_client import ensure_index, index_paper as es_index_paper
+    _ES_AVAILABLE = True
+except ImportError:
+    _ES_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 NCBI_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
@@ -394,12 +401,62 @@ def _mark_error(conn: psycopg.Connection, pmid: str, message: str) -> None:
     conn.commit()
 
 
+def _index_paper_to_es(es: "Elasticsearch", paper: ParsedPaper, journal_title: str | None) -> None:
+    """Index a single paper to Elasticsearch. Errors are logged, not raised."""
+    try:
+        authors_text = "; ".join(
+            f"{a.last_name}{' ' + a.initials if a.initials else ''}"
+            for a in paper.authors[:10]
+        )
+        doc = {
+            "pmid":             paper.pmid,
+            "pmcid":            paper.pmcid,
+            "doi":              paper.doi,
+            "title":            paper.title or "",
+            "abstract":         paper.abstract or "",
+            "pub_year":         paper.pub_year,
+            "journal_title":    journal_title or paper.journal_title,
+            "publication_types": paper.publication_types,
+            "mesh_terms":       [t.descriptor_name for t in paper.mesh_terms],
+            "mesh_major_terms": [t.descriptor_name for t in paper.mesh_terms if t.is_major_topic],
+            "language":         paper.language,
+            "has_full_text":    False,
+            "grant_agencies":   paper.grant_agencies,
+            "authors":          authors_text,
+        }
+        es_index_paper(es, doc)
+    except Exception as exc:
+        logger.warning("ES index failed for PMID %s: %s", paper.pmid, exc)
+
+
+def _upsert_abstract_chunk(conn: psycopg.Connection, paper_db_id: int, paper: ParsedPaper) -> None:
+    """Insert one abstract chunk for the paper if none exists yet."""
+    text = paper.abstract or paper.title or ""
+    if not text:
+        return
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO paper_chunks
+                    (paper_id, chunk_index, chunk_text, source_type,
+                     start_char, end_char, paragraph_index, token_count)
+                VALUES (%s, 0, %s, 'abstract', 0, %s, 0, %s)
+                ON CONFLICT DO NOTHING
+                """,
+                (paper_db_id, text, len(text), len(text) // 4),
+            )
+    except Exception as exc:
+        logger.warning("Chunk insert failed for paper_id %s: %s", paper_db_id, exc)
+
+
 def run_ingestion(
     config: PipelineConfig,
     topics: list[IngestionTopic],
     date_from: str | None = None,
     date_to: str | None = None,
     dry_run: bool = False,
+    es: "Elasticsearch | None" = None,
 ) -> None:
     """Main entry point. Discovers and ingests papers for the given topics.
 
@@ -412,6 +469,8 @@ def run_ingestion(
     """
     conn = psycopg.connect(config.db_dsn, autocommit=False)
     _reset_stale_jobs(conn)
+    if es is not None and _ES_AVAILABLE:
+        ensure_index(es)
 
     with httpx.Client(follow_redirects=True) as client:
         # Phase 1: Discover PMIDs for each topic and queue them
@@ -452,8 +511,12 @@ def run_ingestion(
                                 "UPDATE ingestion_log SET status = 'parsing' WHERE pmid = %s",
                                 (paper.pmid,),
                             )
-                        _upsert_paper(conn, paper)
+                        paper_db_id = _upsert_paper(conn, paper)
+                        _upsert_abstract_chunk(conn, paper_db_id, paper)
                         _mark_done(conn, paper.pmid, paper.xml_checksum)
+                    # ES indexing outside the DB transaction — failure won't roll back PG
+                    if es is not None and _ES_AVAILABLE:
+                        _index_paper_to_es(es, paper, paper.journal_title)
                     total_done += 1
                 except Exception as exc:
                     logger.error("Failed to upsert paper %s: %s", paper.pmid, exc)

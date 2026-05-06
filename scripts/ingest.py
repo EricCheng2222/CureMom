@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from src.ingestion.pipeline import PipelineConfig, run_ingestion
 from src.ingestion.topics import TOPICS, get_topic_by_name, get_topics_by_priority
+from src.search.elasticsearch_client import get_client as get_es_client
 
 logging.basicConfig(
     level=logging.INFO,
@@ -43,6 +44,8 @@ def main() -> None:
                         help="Discover and queue PMIDs only, don't fetch full records")
     parser.add_argument("--db-dsn", default=None,
                         help="PostgreSQL DSN (default: from env vars)")
+    parser.add_argument("--es-host", default=None,
+                        help="Elasticsearch URL (default: from ES_HOST env var or http://localhost:9200)")
     args = parser.parse_args()
 
     db_dsn = args.db_dsn or (
@@ -77,12 +80,16 @@ def main() -> None:
     for t in topics:
         print(f"  [{t.priority}] {t.name}: {t.description}")
 
+    es_host = args.es_host or os.environ.get("ES_HOST", "http://localhost:9200")
+    es = get_es_client(es_host)
+
     run_ingestion(
         config=config,
         topics=topics,
         date_from=args.date_from,
         date_to=args.date_to,
         dry_run=args.dry_run,
+        es=es,
     )
 
 

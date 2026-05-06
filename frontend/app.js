@@ -10,7 +10,6 @@ function switchMode(mode) {
   ['landing', 'consumer', 'professional'].forEach(v => {
     const el = document.getElementById(`view-${v}`);
     if (!el) return;
-    el.hidden = (v !== mode);
     el.classList.toggle('active', v === mode);
   });
 }
@@ -322,10 +321,11 @@ function renderResultCard(c, i) {
         </div>
       </div>
       <div class="result-meta">
-        ${c.authors ? `<span>👤 ${escapeHtml(c.authors)}</span>` : ''}
-        ${c.journal  ? `<span>📰 ${escapeHtml(c.journal)}</span>` : ''}
-        ${c.year     ? `<span>📅 ${c.year}</span>` : ''}
-        ${c.pmid     ? `<span>🔗 PMID ${c.pmid}</span>` : ''}
+        ${c.authors ? `<span class="meta-authors">${escapeHtml(c.authors)}</span>` : ''}
+        ${(c.authors && (c.journal || c.year)) ? `<span class="meta-sep">·</span>` : ''}
+        ${c.journal  ? `<span class="meta-journal">${escapeHtml(c.journal)}</span>` : ''}
+        ${c.year     ? `<span class="meta-year">(${c.year})</span>` : ''}
+        ${c.pmid     ? `<span class="meta-sep">·</span><span class="meta-pmid">PMID ${c.pmid}</span>` : ''}
         ${badges}
       </div>
       ${passage ? `<div class="result-passage">${escapeHtml(passage.slice(0, 320))}${passage.length > 320 ? '…' : ''}</div>` : ''}

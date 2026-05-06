@@ -50,7 +50,7 @@ INDEX_MAPPING = {
             "pmid":              {"type": "keyword"},
             "pmcid":             {"type": "keyword"},
             "doi":               {"type": "keyword"},
-            "title":             {"type": "text", "analyzer": "english", "boost": 2.0,
+            "title":             {"type": "text", "analyzer": "english",
                                   "fields": {"keyword": {"type": "keyword", "ignore_above": 512}}},
             "abstract":          {"type": "text", "analyzer": "english"},
             "full_text":         {"type": "text", "analyzer": "english", "index_options": "offsets"},
