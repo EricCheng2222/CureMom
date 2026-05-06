@@ -91,11 +91,7 @@ async function sendConsumerMessage() {
       return;
     }
     const data = await r.json();
-    const warning = data.metadata?.provider_warning;
-    const text = warning
-      ? `⚠️ ${warning}\n\n${data.response ?? ''}`
-      : (data.response ?? 'No response returned.');
-    appendAIBubble(text, data.citations ?? []);
+    appendAIBubble(data.response ?? 'No response returned.', data.citations ?? []);
   } catch {
     removeTypingBubble(typing);
     appendAIBubble('Could not reach the API. Make sure the server is running.', []);

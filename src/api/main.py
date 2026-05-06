@@ -144,22 +144,14 @@ async def query(
             "metadata": {"retrieval_strategy": req.options.retrieval_strategy, "model_used": "none"},
         }
 
-    provider_warning: str | None = None
     try:
         provider = get_provider(req.options.llm_provider)
         synthesis = provider.synthesize(req.query, chunks)
     except Exception as exc:
-        # Provider unreachable / misconfigured — degrade gracefully to extractive
-        # so the user still gets cited passages instead of a 500.
-        logger.warning(
-            "LLM provider %r failed (%s); falling back to extractive.",
-            req.options.llm_provider, exc,
-        )
-        from .llm_providers import ExtractiveProvider
-        synthesis = ExtractiveProvider().synthesize(req.query, chunks)
-        provider_warning = (
-            f"Requested provider '{req.options.llm_provider}' is unavailable "
-            f"({type(exc).__name__}). Showing extractive results instead."
+        logger.exception("LLM provider %r failed", req.options.llm_provider)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Provider '{req.options.llm_provider}' failed: {type(exc).__name__}: {exc}",
         )
 
     result = build_response(
@@ -172,8 +164,6 @@ async def query(
     )
     output = response_to_dict(result)
     output["metadata"]["latency_ms"] = int((time.monotonic() - start) * 1000)
-    if provider_warning:
-        output["metadata"]["provider_warning"] = provider_warning
     return output
 
 
