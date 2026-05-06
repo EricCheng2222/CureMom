@@ -1,0 +1,37 @@
+# Web framework
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0
+pydantic>=2.7.0
+pydantic-settings>=2.3.0
+
+# Database
+psycopg[binary]>=3.1.19
+psycopg[pool]>=3.1.19
+
+# Elasticsearch
+elasticsearch>=8.13.0
+
+# HTTP + retry
+httpx>=0.27.0
+tenacity>=8.3.0
+
+# XML parsing
+lxml>=5.2.0
+
+# NLP (Phase 2 — install separately to keep MVP lean)
+# transformers>=4.41.0
+# torch>=2.3.0
+# sentence-transformers>=3.0.0
+# scispacy>=0.5.4
+# https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/releases/v0.5.4/en_core_sci_lg-0.5.4.tar.gz
+# https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/releases/v0.5.4/en_ner_bc5cdr_md-0.5.4.tar.gz
+
+# LLM providers (Phase 3 — install as needed)
+# anthropic>=0.28.0
+# openai>=1.30.0
+
+# Utilities
+python-dotenv>=1.0.0
+rich>=13.7.0
+tqdm>=4.66.0
+click>=8.1.7

@@ -1,0 +1,468 @@
+"""Resumable PubMed ingestion pipeline.
+
+State machine:
+  queued → fetching → fetched → parsing → parsed → indexed → done
+                                                           → error (retryable)
+
+On restart, any PMID stuck in a transitional state (fetching/parsing/embedding)
+for more than STALE_THRESHOLD_MINUTES is re-queued automatically.
+"""
+
+from __future__ import annotations
+
+import logging
+import time
+from datetime import datetime, timedelta, timezone
+from typing import Generator
+
+import httpx
+import psycopg
+from psycopg.rows import dict_row
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
+
+from .pubmed_parser import ParsedPaper, parse_pubmed_xml_batch
+from .topics import IngestionTopic
+
+logger = logging.getLogger(__name__)
+
+NCBI_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
+ESEARCH_URL = f"{NCBI_BASE}/esearch.fcgi"
+EFETCH_URL = f"{NCBI_BASE}/efetch.fcgi"
+STALE_THRESHOLD_MINUTES = 60
+BATCH_SIZE = 200   # PMIDs per EFetch request (NCBI allows up to 10,000 but 200 is safe)
+MAX_RETRIES = 3
+
+
+class PipelineConfig:
+    def __init__(
+        self,
+        db_dsn: str,
+        ncbi_api_key: str | None = None,
+        ncbi_email: str = "curemom@example.com",
+        requests_per_second: float | None = None,
+    ) -> None:
+        self.db_dsn = db_dsn
+        self.ncbi_api_key = ncbi_api_key
+        self.ncbi_email = ncbi_email
+        # Rate limiting: 10 req/s with API key, 3 without
+        self.requests_per_second = requests_per_second or (10.0 if ncbi_api_key else 3.0)
+        self._last_request_time: float = 0.0
+
+    def ncbi_params(self) -> dict[str, str]:
+        params: dict[str, str] = {
+            "tool": "curemom",
+            "email": self.ncbi_email,
+            "retmode": "xml",
+        }
+        if self.ncbi_api_key:
+            params["api_key"] = self.ncbi_api_key
+        return params
+
+    def throttle(self) -> None:
+        min_interval = 1.0 / self.requests_per_second
+        elapsed = time.monotonic() - self._last_request_time
+        if elapsed < min_interval:
+            time.sleep(min_interval - elapsed)
+        self._last_request_time = time.monotonic()
+
+
+@retry(
+    retry=retry_if_exception_type(httpx.HTTPError),
+    wait=wait_exponential(multiplier=1, min=2, max=30),
+    stop=stop_after_attempt(MAX_RETRIES),
+)
+def _ncbi_get(client: httpx.Client, url: str, params: dict[str, str]) -> bytes:
+    response = client.get(url, params=params, timeout=30)
+    response.raise_for_status()
+    return response.content
+
+
+def esearch_pmids(
+    client: httpx.Client,
+    config: PipelineConfig,
+    query: str,
+    date_from: str | None = None,
+    date_to: str | None = None,
+) -> list[str]:
+    """Return all PMIDs matching a query via ESearch (handles pagination)."""
+    params = {
+        **config.ncbi_params(),
+        "db": "pubmed",
+        "term": query,
+        "retmax": "0",  # first pass: get total count
+        "usehistory": "y",
+    }
+    if date_from:
+        params["mindate"] = date_from
+    if date_to:
+        params["maxdate"] = date_to
+
+    config.throttle()
+    xml = _ncbi_get(client, ESEARCH_URL, params)
+
+    from lxml import etree
+    root = etree.fromstring(xml)
+    count = int((root.findtext("Count") or "0"))
+    web_env = root.findtext("WebEnv") or ""
+    query_key = root.findtext("QueryKey") or ""
+    logger.info("ESearch found %d results for query: %s", count, query)
+
+    if count == 0:
+        return []
+
+    all_pmids: list[str] = []
+    retstart = 0
+    page_size = 10000
+
+    while retstart < count:
+        config.throttle()
+        fetch_params = {
+            **config.ncbi_params(),
+            "db": "pubmed",
+            "WebEnv": web_env,
+            "query_key": query_key,
+            "retstart": str(retstart),
+            "retmax": str(page_size),
+            "rettype": "uilist",
+            "retmode": "text",
+        }
+        response = _ncbi_get(client, ESEARCH_URL, fetch_params)
+        pmids = [line.strip() for line in response.decode().splitlines() if line.strip().isdigit()]
+        all_pmids.extend(pmids)
+        retstart += page_size
+        logger.debug("Fetched %d/%d PMIDs", len(all_pmids), count)
+
+    return all_pmids
+
+
+def efetch_batch(
+    client: httpx.Client,
+    config: PipelineConfig,
+    pmids: list[str],
+) -> list[ParsedPaper]:
+    """Fetch and parse a batch of papers from EFetch."""
+    params = {
+        **config.ncbi_params(),
+        "db": "pubmed",
+        "id": ",".join(pmids),
+        "rettype": "xml",
+        "retmode": "xml",
+    }
+    config.throttle()
+    xml_bytes = _ncbi_get(client, EFETCH_URL, params)
+    return parse_pubmed_xml_batch(xml_bytes)
+
+
+def _queue_new_pmids(conn: psycopg.Connection, pmids: list[str]) -> int:
+    """Insert PMIDs not yet in ingestion_log. Returns count of newly queued."""
+    if not pmids:
+        return 0
+    with conn.cursor() as cur:
+        cur.executemany(
+            """
+            INSERT INTO ingestion_log (pmid, status)
+            VALUES (%s, 'queued')
+            ON CONFLICT (pmid) DO NOTHING
+            """,
+            [(pmid,) for pmid in pmids],
+        )
+    conn.commit()
+    return cur.rowcount  # type: ignore[return-value]
+
+
+def _reset_stale_jobs(conn: psycopg.Connection) -> int:
+    """Re-queue any jobs stuck in transitional states."""
+    stale_before = datetime.now(timezone.utc) - timedelta(minutes=STALE_THRESHOLD_MINUTES)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE ingestion_log
+            SET status = 'queued', error_message = 'reset from stale state'
+            WHERE status IN ('fetching', 'parsing', 'embedding')
+              AND updated_at < %s
+            """,
+            (stale_before,),
+        )
+        count = cur.rowcount
+    conn.commit()
+    if count:
+        logger.info("Reset %d stale ingestion jobs", count)
+    return count
+
+
+def _iter_queued_pmids(
+    conn: psycopg.Connection, batch_size: int = BATCH_SIZE
+) -> Generator[list[str], None, None]:
+    """Yield batches of queued PMIDs, marking them as 'fetching'."""
+    while True:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                SELECT pmid FROM ingestion_log
+                WHERE status = 'queued'
+                ORDER BY queued_at
+                LIMIT %s
+                FOR UPDATE SKIP LOCKED
+                """,
+                (batch_size,),
+            )
+            rows = cur.fetchall()
+
+        if not rows:
+            break
+
+        pmids = [r["pmid"] for r in rows]
+
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE ingestion_log SET status = 'fetching' WHERE pmid = ANY(%s)",
+                (pmids,),
+            )
+        conn.commit()
+        yield pmids
+
+
+def _upsert_paper(conn: psycopg.Connection, paper: ParsedPaper) -> int:
+    """Upsert a parsed paper into PostgreSQL. Returns the internal paper.id."""
+    with conn.cursor() as cur:
+        # Journal (upsert)
+        journal_id = None
+        if paper.journal_title:
+            cur.execute(
+                """
+                INSERT INTO journals (title, abbreviation, issn, eissn, nlm_id)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (nlm_id) DO UPDATE
+                    SET title = EXCLUDED.title,
+                        abbreviation = EXCLUDED.abbreviation
+                RETURNING id
+                """,
+                (
+                    paper.journal_title,
+                    paper.journal_abbreviation,
+                    paper.journal_issn,
+                    paper.journal_eissn,
+                    paper.journal_nlm_id,
+                ),
+            )
+            row = cur.fetchone()
+            journal_id = row[0] if row else None
+
+        # Paper upsert
+        pub_date = None
+        if paper.pub_date:
+            try:
+                # Attempt to parse ISO date; store NULL if unparseable
+                from datetime import date
+                parts = paper.pub_date.split("-")
+                if len(parts) == 3:
+                    pub_date = date(int(parts[0]), int(parts[1]), int(parts[2]))
+            except (ValueError, TypeError):
+                pass
+
+        cur.execute(
+            """
+            INSERT INTO papers (
+                pmid, pmcid, doi, title, abstract, abstract_json,
+                pub_year, pub_date, journal_id, publication_types,
+                language, grant_agencies, last_updated
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+            ON CONFLICT (pmid) DO UPDATE SET
+                pmcid              = EXCLUDED.pmcid,
+                doi                = EXCLUDED.doi,
+                title              = EXCLUDED.title,
+                abstract           = EXCLUDED.abstract,
+                abstract_json      = EXCLUDED.abstract_json,
+                pub_year           = EXCLUDED.pub_year,
+                pub_date           = EXCLUDED.pub_date,
+                journal_id         = EXCLUDED.journal_id,
+                publication_types  = EXCLUDED.publication_types,
+                language           = EXCLUDED.language,
+                grant_agencies     = EXCLUDED.grant_agencies,
+                last_updated       = NOW()
+            RETURNING id
+            """,
+            (
+                paper.pmid,
+                paper.pmcid,
+                paper.doi,
+                paper.title,
+                paper.abstract,
+                psycopg.types.json.Jsonb(paper.abstract_json) if paper.abstract_json else None,
+                paper.pub_year,
+                pub_date,
+                journal_id,
+                paper.publication_types,
+                paper.language,
+                paper.grant_agencies,
+            ),
+        )
+        paper_db_id = cur.fetchone()[0]  # type: ignore[index]
+
+        # Authors
+        for pos, author in enumerate(paper.authors):
+            cur.execute(
+                """
+                INSERT INTO authors (last_name, fore_name, initials, orcid)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (last_name, fore_name, orcid) DO UPDATE SET initials = EXCLUDED.initials
+                RETURNING id
+                """,
+                (author.last_name, author.fore_name, author.initials, author.orcid),
+            )
+            author_id = cur.fetchone()[0]  # type: ignore[index]
+            cur.execute(
+                """
+                INSERT INTO paper_authors (paper_id, author_id, position, affiliations)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (paper_id, author_id) DO NOTHING
+                """,
+                (paper_db_id, author_id, pos, author.affiliations or None),
+            )
+
+        # MeSH terms
+        for term in paper.mesh_terms:
+            cur.execute(
+                """
+                INSERT INTO mesh_terms (descriptor_ui, descriptor_name)
+                VALUES (%s, %s)
+                ON CONFLICT (descriptor_ui) DO NOTHING
+                RETURNING id
+                """,
+                (term.descriptor_ui, term.descriptor_name),
+            )
+            row = cur.fetchone()
+            if row is None:
+                cur.execute("SELECT id FROM mesh_terms WHERE descriptor_ui = %s", (term.descriptor_ui,))
+                row = cur.fetchone()
+            mesh_id = row[0]  # type: ignore[index]
+
+            cur.execute(
+                """
+                INSERT INTO paper_mesh (paper_id, mesh_id, qualifier_name, is_major_topic)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
+                """,
+                (paper_db_id, mesh_id, term.qualifier_name, term.is_major_topic),
+            )
+
+        # References
+        for cited_pmid in paper.cited_pmids:
+            cur.execute(
+                """
+                INSERT INTO citations (citing_paper_id, cited_pmid_raw)
+                VALUES (%s, %s)
+                ON CONFLICT DO NOTHING
+                """,
+                (paper_db_id, cited_pmid),
+            )
+
+    return paper_db_id
+
+
+def _mark_done(conn: psycopg.Connection, pmid: str, checksum: str) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE ingestion_log
+            SET status = 'indexed', xml_checksum = %s, indexed_at = NOW()
+            WHERE pmid = %s
+            """,
+            (checksum, pmid),
+        )
+    conn.commit()
+
+
+def _mark_error(conn: psycopg.Connection, pmid: str, message: str) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE ingestion_log
+            SET status = 'error', error_message = %s, retry_count = retry_count + 1
+            WHERE pmid = %s
+            """,
+            (message[:2000], pmid),
+        )
+    conn.commit()
+
+
+def run_ingestion(
+    config: PipelineConfig,
+    topics: list[IngestionTopic],
+    date_from: str | None = None,
+    date_to: str | None = None,
+    dry_run: bool = False,
+) -> None:
+    """Main entry point. Discovers and ingests papers for the given topics.
+
+    Args:
+        config: Pipeline configuration (DB DSN, NCBI credentials, etc.)
+        topics: List of IngestionTopic to query
+        date_from: Optional NCBI date filter (YYYY/MM/DD)
+        date_to: Optional NCBI date filter (YYYY/MM/DD)
+        dry_run: If True, discover PMIDs and queue them but don't fetch full records.
+    """
+    conn = psycopg.connect(config.db_dsn, autocommit=False)
+    _reset_stale_jobs(conn)
+
+    with httpx.Client(follow_redirects=True) as client:
+        # Phase 1: Discover PMIDs for each topic and queue them
+        for topic in topics:
+            logger.info("Discovering PMIDs for topic: %s", topic.name)
+            try:
+                pmids = esearch_pmids(client, config, topic.mesh_query, date_from, date_to)
+                new_count = _queue_new_pmids(conn, pmids)
+                logger.info("Topic %s: %d PMIDs found, %d newly queued", topic.name, len(pmids), new_count)
+            except Exception as exc:
+                logger.error("ESearch failed for topic %s: %s", topic.name, exc)
+
+        if dry_run:
+            logger.info("Dry run complete — PMIDs queued, skipping fetch.")
+            conn.close()
+            return
+
+        # Phase 2: Fetch and parse queued papers
+        total_done = 0
+        total_error = 0
+        for pmid_batch in _iter_queued_pmids(conn):
+            logger.info("Fetching batch of %d PMIDs", len(pmid_batch))
+            try:
+                papers = efetch_batch(client, config, pmid_batch)
+            except Exception as exc:
+                logger.error("EFetch failed for batch: %s", exc)
+                for pmid in pmid_batch:
+                    _mark_error(conn, pmid, str(exc))
+                total_error += len(pmid_batch)
+                continue
+
+            fetched_pmids = {p.pmid for p in papers}
+            for paper in papers:
+                try:
+                    with conn.transaction():
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                "UPDATE ingestion_log SET status = 'parsing' WHERE pmid = %s",
+                                (paper.pmid,),
+                            )
+                        _upsert_paper(conn, paper)
+                        _mark_done(conn, paper.pmid, paper.xml_checksum)
+                    total_done += 1
+                except Exception as exc:
+                    logger.error("Failed to upsert paper %s: %s", paper.pmid, exc)
+                    _mark_error(conn, paper.pmid, str(exc))
+                    total_error += 1
+
+            # Mark any PMIDs that EFetch didn't return (NCBI removed or non-article)
+            for pmid in pmid_batch:
+                if pmid not in fetched_pmids:
+                    _mark_error(conn, pmid, "not returned by EFetch")
+                    total_error += 1
+
+        logger.info("Ingestion complete. Done: %d, Errors: %d", total_done, total_error)
+
+    conn.close()
