@@ -12,6 +12,8 @@ import psycopg
 from elasticsearch import Elasticsearch
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from psycopg.rows import dict_row
 from pydantic import BaseModel, Field
 
@@ -69,6 +71,16 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Serve the frontend SPA — must be mounted AFTER all API routes are defined.
+# We register a redirect for "/" here; the full mount happens at module bottom.
+@app.get("/", include_in_schema=False)
+async def frontend_root():
+    import pathlib
+    p = pathlib.Path(__file__).parent.parent.parent / "frontend" / "index.html"
+    if p.exists():
+        return FileResponse(str(p))
+    return {"message": "CureMom API — frontend not found, serve frontend/ separately"}
 
 
 # ─── Dependency helpers ───────────────────────────────────────────────────────
@@ -332,3 +344,11 @@ async def stats(db: Annotated[psycopg.Connection, Depends(get_db)]) -> dict:
 @app.get("/api/v1/health")
 async def health() -> dict:
     return {"status": "ok"}
+
+
+# ── Static files (frontend SPA) ───────────────────────────────────────────────
+# Mounted last so /api/v1/* routes take priority.
+import pathlib as _pathlib
+_frontend_dir = _pathlib.Path(__file__).parent.parent.parent / "frontend"
+if _frontend_dir.exists():
+    app.mount("/static", StaticFiles(directory=str(_frontend_dir)), name="static")

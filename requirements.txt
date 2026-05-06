@@ -1,6 +1,7 @@
 # Web framework
 fastapi>=0.111.0
 uvicorn[standard]>=0.30.0
+aiofiles>=23.2.0
 pydantic>=2.7.0
 pydantic-settings>=2.3.0
 
