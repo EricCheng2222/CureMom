@@ -72,15 +72,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Serve the frontend SPA — must be mounted AFTER all API routes are defined.
-# We register a redirect for "/" here; the full mount happens at module bottom.
-@app.get("/", include_in_schema=False)
-async def frontend_root():
-    import pathlib
-    p = pathlib.Path(__file__).parent.parent.parent / "frontend" / "index.html"
-    if p.exists():
-        return FileResponse(str(p))
-    return {"message": "CureMom API — frontend not found, serve frontend/ separately"}
+# "/" and static files are served via app.mount at module bottom.
 
 
 # ─── Dependency helpers ───────────────────────────────────────────────────────
@@ -347,8 +339,9 @@ async def health() -> dict:
 
 
 # ── Static files (frontend SPA) ───────────────────────────────────────────────
-# Mounted last so /api/v1/* routes take priority.
+# Mounted last so /api/v1/* routes take priority. html=True serves index.html
+# for "/" and lets the browser fetch style.css / app.js at root-relative paths.
 import pathlib as _pathlib
 _frontend_dir = _pathlib.Path(__file__).parent.parent.parent / "frontend"
 if _frontend_dir.exists():
-    app.mount("/static", StaticFiles(directory=str(_frontend_dir)), name="static")
+    app.mount("/", StaticFiles(directory=str(_frontend_dir), html=True), name="frontend")

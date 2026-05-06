@@ -1,38 +1,33 @@
 'use strict';
 
-// ── Config ──────────────────────────────────────────────────────────────────
-// In production, replace with the actual server URL. During dev, FastAPI
-// serves both the API and this frontend from the same origin.
-const API = '';  // same-origin; change to 'http://localhost:8000' if serving separately
+const API = '';
 
 // ── View switching ──────────────────────────────────────────────────────────
 function switchMode(mode) {
   ['landing', 'consumer', 'professional'].forEach(v => {
     const el = document.getElementById(`view-${v}`);
-    if (!el) return;
-    el.classList.toggle('active', v === mode);
+    if (el) el.classList.toggle('active', v === mode);
   });
 }
-switchMode('landing');
 
 // ── Status check ────────────────────────────────────────────────────────────
 async function checkStatus() {
-  const dot  = document.querySelector('.status-dot');
+  const dot  = document.getElementById('status-dot');
   const text = document.getElementById('status-text');
   try {
     const r = await fetch(`${API}/api/v1/stats`, { signal: AbortSignal.timeout(4000) });
     if (r.ok) {
       const d = await r.json();
       dot.className = 'status-dot ok';
-      const n = d.papers_count ?? d.total_papers ?? '?';
-      text.textContent = `${n.toLocaleString()} papers indexed`;
+      const n = d.total_papers ?? d.papers_count ?? '?';
+      text.textContent = `${Number(n).toLocaleString()} papers indexed`;
     } else {
       dot.className = 'status-dot warn';
-      text.textContent = 'API reachable, limited data';
+      text.textContent = 'API reachable';
     }
   } catch {
     dot.className = 'status-dot err';
-    text.textContent = 'API offline — start with: uvicorn src.api.main:app';
+    text.textContent = 'API offline';
   }
 }
 checkStatus();
@@ -42,8 +37,8 @@ let activeTopic = 'lupus';
 
 function setTopic(t) {
   activeTopic = t;
-  document.querySelectorAll('.topic-chip').forEach(c =>
-    c.classList.toggle('active-topic', c.getAttribute('onclick').includes(`'${t}'`))
+  document.querySelectorAll('.chip').forEach(c =>
+    c.classList.toggle('active-chip', c.getAttribute('onclick').includes(`'${t}'`))
   );
 }
 
@@ -56,7 +51,7 @@ function fillExample(btn) {
 
 function autoResize(el) {
   el.style.height = 'auto';
-  el.style.height = Math.min(el.scrollHeight, 160) + 'px';
+  el.style.height = Math.min(el.scrollHeight, 140) + 'px';
 }
 
 function handleChatKey(e) {
@@ -80,41 +75,26 @@ async function sendConsumerMessage() {
     const provider = document.getElementById('consumer-provider').value;
     const simple   = document.getElementById('consumer-simple').checked;
 
-    const payload = {
-      query,
-      options: {
-        top_k: 8,
-        retrieval_strategy: 'bm25',
-        llm_provider: provider,
-        plain_language: simple,
-      },
-    };
-
     const r = await fetch(`${API}/api/v1/query`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({
+        query,
+        options: { top_k: 8, retrieval_strategy: 'bm25', llm_provider: provider, plain_language: simple },
+      }),
     });
 
     removeTypingBubble(typing);
-
     if (!r.ok) {
       const err = await r.json().catch(() => ({}));
-      appendAIBubble(
-        `Sorry, I couldn't get a response right now. ${err.detail ?? r.statusText}`,
-        []
-      );
+      appendAIBubble(`Sorry, I couldn't get a response. ${err.detail ?? r.statusText}`, []);
       return;
     }
-
     const data = await r.json();
     appendAIBubble(data.response ?? 'No response returned.', data.citations ?? []);
-  } catch (e) {
+  } catch {
     removeTypingBubble(typing);
-    appendAIBubble(
-      'Could not reach the API. Make sure the server is running: `uvicorn src.api.main:app --reload`',
-      []
-    );
+    appendAIBubble('Could not reach the API. Make sure the server is running.', []);
   } finally {
     btn.disabled = false;
   }
@@ -123,8 +103,8 @@ async function sendConsumerMessage() {
 function appendUserBubble(text) {
   const msgs = document.getElementById('chat-messages');
   const d = document.createElement('div');
-  d.className = 'message user-message';
-  d.innerHTML = `<div class="message-bubble">${escapeHtml(text)}</div>`;
+  d.className = 'msg msg-user';
+  d.innerHTML = `<div class="msg-content">${escapeHtml(text)}</div>`;
   msgs.appendChild(d);
   scrollChat();
 }
@@ -132,31 +112,26 @@ function appendUserBubble(text) {
 function appendTypingBubble() {
   const msgs = document.getElementById('chat-messages');
   const d = document.createElement('div');
-  d.className = 'message ai-message typing-indicator';
+  d.className = 'msg msg-ai';
   d.innerHTML = `
-    <div class="message-avatar">
-      <svg width="20" height="20" viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="10" fill="#6366F1"/></svg>
+    <div class="msg-avatar">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 2C5.24 2 3 4.24 3 7C3 9.76 5.24 12 8 12C10.76 12 13 9.76 13 7" stroke="white" stroke-width="1.5" stroke-linecap="round"/><path d="M7 5H9M8 3V9" stroke="white" stroke-width="1.5" stroke-linecap="round"/></svg>
     </div>
-    <div class="message-bubble">
-      <div class="typing-dot"></div>
-      <div class="typing-dot"></div>
-      <div class="typing-dot"></div>
+    <div class="msg-content typing-bubble">
+      <div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div>
     </div>`;
   msgs.appendChild(d);
   scrollChat();
   return d;
 }
 
-function removeTypingBubble(el) {
-  el?.remove();
-}
+function removeTypingBubble(el) { el?.remove(); }
 
 function appendAIBubble(text, citations) {
   const msgs = document.getElementById('chat-messages');
   const d = document.createElement('div');
-  d.className = 'message ai-message';
+  d.className = 'msg msg-ai';
 
-  // Linkify [N] citation markers
   const linked = text.replace(/\[(\d+)\]/g, (_, n) => {
     const c = citations[parseInt(n, 10) - 1];
     return c
@@ -168,31 +143,24 @@ function appendAIBubble(text, citations) {
   if (citations.length) {
     const pills = citations.slice(0, 5).map((c, i) => `
       <button class="citation-pill" onclick="openModal(${JSON.stringify(c).replace(/"/g, '&quot;')})">
-        <div class="citation-index">${i + 1}</div>
-        <div class="citation-meta">
+        <div class="cite-num">${i + 1}</div>
+        <div class="cite-meta">
           <strong>${escapeHtml(c.title ?? 'Unknown title')}</strong><br>
-          ${escapeHtml(c.authors ?? '')} ${c.year ? `(${c.year})` : ''} ·
-          ${escapeHtml(c.journal ?? '')}
+          ${escapeHtml(c.authors ?? '')} ${c.year ? `(${c.year})` : ''} · ${escapeHtml(c.journal ?? '')}
         </div>
       </button>`).join('');
     citeHtml = `
       <button class="citations-toggle" onclick="this.nextElementSibling.hidden=!this.nextElementSibling.hidden">
-        📄 ${citations.length} source${citations.length > 1 ? 's' : ''}
+        📄 ${citations.length} source${citations.length !== 1 ? 's' : ''}
       </button>
       <div class="citations-block" hidden>${pills}</div>`;
   }
 
   d.innerHTML = `
-    <div class="message-avatar">
-      <svg width="20" height="20" viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="10" fill="#6366F1"/>
-        <path d="M10 4C7.2 4 5 6.2 5 9C5 11.8 7.2 14 10 14C12.8 14 15 11.8 15 9" stroke="white" stroke-width="1.5"/>
-        <path d="M9 7H11M10 5V11" stroke="white" stroke-width="1.5" stroke-linecap="round"/>
-      </svg>
+    <div class="msg-avatar">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 2C5.24 2 3 4.24 3 7C3 9.76 5.24 12 8 12C10.76 12 13 9.76 13 7" stroke="white" stroke-width="1.5" stroke-linecap="round"/><path d="M7 5H9M8 3V9" stroke="white" stroke-width="1.5" stroke-linecap="round"/></svg>
     </div>
-    <div class="message-bubble">
-      <div>${linked}</div>
-      ${citeHtml}
-    </div>`;
+    <div class="msg-content"><div>${linked}</div>${citeHtml}</div>`;
   msgs.appendChild(d);
   scrollChat();
 }
@@ -203,9 +171,7 @@ function scrollChat() {
 }
 
 // ── Professional search ──────────────────────────────────────────────────────
-function handleProKey(e) {
-  if (e.key === 'Enter') sendProQuery();
-}
+function handleProKey(e) { if (e.key === 'Enter') sendProQuery(); }
 
 function resetFilters() {
   document.querySelectorAll('.pub-type').forEach(c => c.checked = false);
@@ -237,18 +203,14 @@ async function sendProQuery() {
     query,
     filters: {
       ...(pubTypes.length && { publication_types: pubTypes }),
-      ...(yearFrom && { pub_year_from: parseInt(yearFrom, 10) }),
-      ...(yearTo   && { pub_year_to:   parseInt(yearTo,   10) }),
+      ...(yearFrom        && { pub_year_from: parseInt(yearFrom, 10) }),
+      ...(yearTo          && { pub_year_to:   parseInt(yearTo,   10) }),
     },
-    options: {
-      top_k: topK,
-      retrieval_strategy: strategy,
-      llm_provider: provider,
-    },
+    options: { top_k: topK, retrieval_strategy: strategy, llm_provider: provider },
   };
 
-  const resultsEl = document.getElementById('pro-results');
-  const responseBox = document.getElementById('pro-response-box');
+  const resultsEl    = document.getElementById('pro-results');
+  const responseBox  = document.getElementById('pro-response-box');
   resultsEl.innerHTML = renderSkeletons(3);
   responseBox.hidden = true;
 
@@ -258,17 +220,14 @@ async function sendProQuery() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
-
     if (!r.ok) {
       const err = await r.json().catch(() => ({}));
-      resultsEl.innerHTML = `<div class="pro-empty-state"><p>Error: ${err.detail ?? r.statusText}</p></div>`;
+      resultsEl.innerHTML = `<div class="empty-state"><p>Error: ${err.detail ?? r.statusText}</p></div>`;
       return;
     }
-
-    const data = await r.json();
-    renderProResults(data);
-  } catch (e) {
-    resultsEl.innerHTML = `<div class="pro-empty-state"><p>Could not reach the API. Is the server running?</p></div>`;
+    renderProResults(await r.json());
+  } catch {
+    resultsEl.innerHTML = `<div class="empty-state"><p>Could not reach the API.</p></div>`;
   } finally {
     btn.disabled = false;
     btn.textContent = 'Search';
@@ -276,7 +235,7 @@ async function sendProQuery() {
 }
 
 function renderProResults(data) {
-  const responseBox = document.getElementById('pro-response-box');
+  const responseBox  = document.getElementById('pro-response-box');
   const responseText = document.getElementById('pro-response-text');
   const modelBadge   = document.getElementById('pro-model-badge');
   const latencyBadge = document.getElementById('pro-latency');
@@ -291,11 +250,10 @@ function renderProResults(data) {
 
   const citations = data.citations ?? [];
   if (!citations.length) {
-    resultsEl.innerHTML = `<div class="pro-empty-state"><p>No results found. Try broadening your query or removing filters.</p></div>`;
+    resultsEl.innerHTML = `<div class="empty-state"><p>No results found. Try broadening your query.</p></div>`;
     return;
   }
-
-  resultsEl.innerHTML = citations.map((c, i) => renderResultCard(c, i)).join('');
+  resultsEl.innerHTML = citations.map(renderResultCard).join('');
 }
 
 function renderResultCard(c, i) {
@@ -322,10 +280,10 @@ function renderResultCard(c, i) {
       </div>
       <div class="result-meta">
         ${c.authors ? `<span class="meta-authors">${escapeHtml(c.authors)}</span>` : ''}
-        ${(c.authors && (c.journal || c.year)) ? `<span class="meta-sep">·</span>` : ''}
-        ${c.journal  ? `<span class="meta-journal">${escapeHtml(c.journal)}</span>` : ''}
-        ${c.year     ? `<span class="meta-year">(${c.year})</span>` : ''}
-        ${c.pmid     ? `<span class="meta-sep">·</span><span class="meta-pmid">PMID ${c.pmid}</span>` : ''}
+        ${c.authors && (c.journal || c.year) ? '<span class="meta-sep">·</span>' : ''}
+        ${c.journal ? `<span class="meta-journal">${escapeHtml(c.journal)}</span>` : ''}
+        ${c.year    ? `<span class="meta-year">(${c.year})</span>` : ''}
+        ${c.pmid    ? `<span class="meta-sep">·</span><span class="meta-pmid">PMID ${c.pmid}</span>` : ''}
         ${badges}
       </div>
       ${passage ? `<div class="result-passage">${escapeHtml(passage.slice(0, 320))}${passage.length > 320 ? '…' : ''}</div>` : ''}
@@ -342,15 +300,15 @@ function renderResultCard(c, i) {
 function renderSkeletons(n) {
   return Array.from({ length: n }, () => `
     <div class="result-card">
-      <div class="skeleton" style="height:16px;width:60%;margin-bottom:10px"></div>
-      <div class="skeleton" style="height:12px;width:85%;margin-bottom:8px"></div>
-      <div class="skeleton" style="height:12px;width:40%"></div>
+      <div class="skeleton" style="height:14px;width:55%;margin-bottom:10px"></div>
+      <div class="skeleton" style="height:11px;width:80%;margin-bottom:7px"></div>
+      <div class="skeleton" style="height:11px;width:35%"></div>
     </div>`).join('');
 }
 
-// ── Citation detail modal ────────────────────────────────────────────────────
+// ── Citation modal ──────────────────────────────────────────────────────────
 function openModal(citation) {
-  const modal = document.getElementById('citation-modal');
+  const modal   = document.getElementById('citation-modal');
   const content = document.getElementById('modal-content');
   const pmidUrl = `https://pubmed.ncbi.nlm.nih.gov/${citation.pmid}/`;
 
@@ -362,15 +320,13 @@ function openModal(citation) {
 
   content.innerHTML = `
     <a class="modal-pmid-link" href="${pmidUrl}" target="_blank" rel="noopener">
-      <svg width="13" height="13" viewBox="0 0 13 13" fill="none"><path d="M5 2H2C1.4 2 1 2.4 1 3V11C1 11.6 1.4 12 2 12H10C10.6 12 11 11.6 11 11V8M8 1H12M12 1V5M12 1L5.5 7.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M4.5 2H2C1.4 2 1 2.4 1 3V10C1 10.6 1.4 11 2 11H9C9.6 11 10 10.6 10 10V7.5M7 1H11M11 1V5M11 1L5 7" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
       PMID ${citation.pmid} — View on PubMed
     </a>
     <div class="modal-title">${escapeHtml(citation.title ?? 'Untitled')}</div>
     <div class="modal-authors">${escapeHtml(citation.authors ?? '')} · ${escapeHtml(citation.journal ?? '')} ${citation.year ? `(${citation.year})` : ''}</div>
     ${citation.abstract ? `<div class="modal-abstract">${escapeHtml(citation.abstract)}</div>` : ''}
-    ${passage ? `
-      <div class="modal-passage-label">Cited passage</div>
-      <div class="modal-passage">${escapeHtml(passage)}</div>` : ''}
+    ${passage ? `<div class="modal-passage-label">Cited passage</div><div class="modal-passage">${escapeHtml(passage)}</div>` : ''}
     <div class="modal-meta-row">${pubTypes}</div>`;
 
   modal.hidden = false;
@@ -391,17 +347,3 @@ function escapeHtml(str) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
 }
-
-// Citation ref button style (inline, so it inherits bubble context)
-const refStyle = document.createElement('style');
-refStyle.textContent = `
-  .citation-ref {
-    display: inline-flex; align-items: center; justify-content: center;
-    width: 20px; height: 18px; border-radius: 4px;
-    background: #EEF2FF; color: #6366F1; font-size: 11px; font-weight: 700;
-    border: 1px solid #C7D2FE; cursor: pointer; margin: 0 1px;
-    vertical-align: middle; transition: background .15s;
-  }
-  .citation-ref:hover { background: #C7D2FE; }
-`;
-document.head.appendChild(refStyle);
