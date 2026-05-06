@@ -140,6 +140,23 @@ PYTHONPATH=. python scripts/embed.py --index-only
 The first run downloads `microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract-fulltext`
 (~440 MB) and takes ~1 hour for 33K chunks on M-series Macs (faster on GPU).
 
+### 9. (Phase 2 — optional) Extract biomedical entities (for Phase 4 graph)
+
+scispaCy NER over each chunk identifies diseases, chemicals, genes, and cell
+types. Output rows in `paper_entities` are the substrate for Phase 4's
+HippoRAG entity-graph traversal.
+
+```bash
+# scispaCy adds ~3 GB of model files; install only on machines that run NER
+pip install scispacy
+pip install https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/releases/v0.5.4/en_core_sci_lg-0.5.4.tar.gz
+pip install https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/releases/v0.5.4/en_ner_bc5cdr_md-0.5.4.tar.gz
+
+PYTHONPATH=. python scripts/extract_entities.py
+# Or with UMLS CUI resolution (slower, downloads UMLS index on first use):
+PYTHONPATH=. python scripts/extract_entities.py --with-linker
+```
+
 ---
 
 ## API Usage
