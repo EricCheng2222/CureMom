@@ -80,7 +80,7 @@ async function sendConsumerMessage() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         query,
-        options: { top_k: 12, retrieval_strategy: 'bm25', llm_provider: provider, plain_language: simple },
+        options: { top_k: 12, retrieval_strategy: 'full', llm_provider: provider, plain_language: simple },
       }),
     });
 
@@ -177,7 +177,7 @@ function resetFilters() {
   document.querySelectorAll('.pub-type').forEach(c => c.checked = false);
   document.getElementById('year-from').value = '';
   document.getElementById('year-to').value = '';
-  document.querySelector('[name=strategy][value=bm25]').checked = true;
+  document.querySelector('[name=strategy][value=full]').checked = true;
   document.getElementById('pro-provider').value = 'extractive';
   document.getElementById('topk-slider').value = 10;
   document.getElementById('topk-val').textContent = '10';

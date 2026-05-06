@@ -115,7 +115,7 @@ class QueryFilters(BaseModel):
 
 class QueryOptions(BaseModel):
     top_k: int = Field(default=10, ge=1, le=50)
-    retrieval_strategy: str = Field(default="bm25", pattern="^(bm25|hybrid|hipporag|full)$")
+    retrieval_strategy: str = Field(default="full", pattern="^(bm25|hybrid|hipporag|full)$")
     include_full_passages: bool = True
     llm_provider: str | None = None   # override LLM_PROVIDER env var
 

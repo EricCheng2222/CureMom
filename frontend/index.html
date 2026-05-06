@@ -209,8 +209,10 @@
 
       <div class="filter-section">
         <div class="filter-label">Retrieval Strategy</div>
-        <label class="filter-row"><input type="radio" name="strategy" value="bm25" checked /><span>BM25 (keyword)</span></label>
+        <label class="filter-row"><input type="radio" name="strategy" value="bm25" /><span>BM25 (keyword)</span></label>
         <label class="filter-row"><input type="radio" name="strategy" value="hybrid" /><span>Hybrid BM25 + dense</span></label>
+        <label class="filter-row"><input type="radio" name="strategy" value="hipporag" /><span>HippoRAG (entity graph)</span></label>
+        <label class="filter-row"><input type="radio" name="strategy" value="full" checked /><span>Full (BM25 + dense + HippoRAG)</span></label>
       </div>
 
       <div class="filter-section">
