@@ -348,7 +348,7 @@ def _upsert_paper(conn: psycopg.Connection, paper: ParsedPaper) -> int:
                 VALUES (%s, %s, %s, %s)
                 ON CONFLICT DO NOTHING
                 """,
-                (paper_db_id, mesh_id, term.qualifier_name, term.is_major_topic),
+                (paper_db_id, mesh_id, term.qualifier_name or '', term.is_major_topic),
             )
 
         # References

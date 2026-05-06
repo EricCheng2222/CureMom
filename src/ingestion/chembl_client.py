@@ -198,6 +198,103 @@ class ChEMBLClient:
         })
         return data.get("mechanisms", [])
 
+    def get_all_clinical_targets(self, min_phase: int = 1) -> list[ChEMBLTarget]:
+        """Return all human single-protein targets with ≥1 compound at clinical phase ≥ min_phase.
+
+        Scans all ChEMBL mechanism-of-action records to identify targets in the
+        clinically-validated druggable space (~3,000 targets for min_phase=1).
+        No hand-picking — covers the complete druggable proteome.
+
+        Steps:
+          1. Paginate /mechanism → collect unique target ChEMBL IDs and their linked molecules
+          2. If min_phase > 1, batch-query molecule max_phase and filter accordingly
+          3. Batch-fetch /target details, keeping only Homo sapiens SINGLE PROTEIN targets
+        """
+        logger.info("Scanning ChEMBL mechanism records for all clinical targets...")
+
+        # Step 1: Collect unique target IDs and their linked molecule IDs from all mechanism records
+        target_ids: set[str] = set()
+        mol_ids_by_target: dict[str, set[str]] = {}
+        record_count = 0
+
+        for item in self._paginate("/mechanism", {}):
+            tid = item.get("target_chembl_id")
+            mid = item.get("molecule_chembl_id")
+            if tid and mid:
+                target_ids.add(tid)
+                mol_ids_by_target.setdefault(tid, set()).add(mid)
+            record_count += 1
+            if record_count % 10_000 == 0:
+                logger.info("  ... scanned %d mechanism records, %d unique targets so far",
+                            record_count, len(target_ids))
+
+        logger.info("Scanned %d mechanism records → %d unique target IDs",
+                    record_count, len(target_ids))
+
+        # Step 2: Filter targets by molecule clinical phase if min_phase > 1
+        if min_phase > 1:
+            all_mol_ids = sorted({mid for mids in mol_ids_by_target.values() for mid in mids})
+            clinical_mol_ids: set[str] = set()
+            batch_size = 100
+            logger.info("Filtering %d molecules by max_phase >= %d...", len(all_mol_ids), min_phase)
+
+            for i in range(0, len(all_mol_ids), batch_size):
+                batch = all_mol_ids[i:i + batch_size]
+                data = self._get("/molecule", params={
+                    "molecule_chembl_id__in": ",".join(batch),
+                    "max_phase__gte": str(min_phase),
+                    "format": "json",
+                    "limit": batch_size,
+                })
+                for mol in data.get("molecules", []):
+                    mid = mol.get("molecule_chembl_id")
+                    if mid:
+                        clinical_mol_ids.add(mid)
+
+            target_ids = {
+                tid for tid, mids in mol_ids_by_target.items()
+                if mids & clinical_mol_ids
+            }
+            logger.info("After phase >= %d filter: %d targets remain", min_phase, len(target_ids))
+
+        # Step 3: Batch-fetch target details, filter for Homo sapiens SINGLE PROTEIN
+        targets: list[ChEMBLTarget] = []
+        target_id_list = sorted(target_ids)
+        batch_size = 50
+
+        logger.info("Fetching details for %d candidate targets...", len(target_id_list))
+        for i in range(0, len(target_id_list), batch_size):
+            batch = target_id_list[i:i + batch_size]
+            data = self._get("/target", params={
+                "target_chembl_id__in": ",".join(batch),
+                "organism": "Homo sapiens",
+                "target_type": "SINGLE PROTEIN",
+                "format": "json",
+                "limit": batch_size,
+            })
+            for t in data.get("targets", []):
+                gene = None
+                for comp in t.get("target_components", []):
+                    for syn in comp.get("target_component_synonyms", []):
+                        if syn.get("syn_type") == "GENE_SYMBOL":
+                            gene = syn.get("component_synonym")
+                            break
+                    if gene:
+                        break
+                targets.append(ChEMBLTarget(
+                    chembl_id=t["target_chembl_id"],
+                    pref_name=t.get("pref_name", ""),
+                    target_type=t.get("target_type", ""),
+                    gene_name=gene,
+                    organism=t.get("organism"),
+                ))
+
+            if i > 0 and (i // batch_size) % 20 == 0:
+                logger.info("  ... fetched %d/%d", i, len(target_id_list))
+
+        logger.info("Total human single-protein clinical targets: %d", len(targets))
+        return targets
+
     def close(self) -> None:
         self._client.close()
 
