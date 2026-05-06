@@ -129,11 +129,13 @@ def esearch_pmids(
             "retstart": str(retstart),
             "retmax": str(page_size),
             "rettype": "uilist",
-            "retmode": "text",
+            # Note: NCBI ignores retmode=text for history-server queries and always
+            # returns XML — parse <Id> elements instead of splitting on newlines.
         }
         response = _ncbi_get(client, ESEARCH_URL, fetch_params)
-        pmids = [line.strip() for line in response.decode().splitlines() if line.strip().isdigit()]
-        all_pmids.extend(pmids)
+        page_root = etree.fromstring(response)
+        page_pmids = [el.text.strip() for el in page_root.findall(".//Id") if el.text]
+        all_pmids.extend(page_pmids)
         retstart += page_size
         logger.debug("Fetched %d/%d PMIDs", len(all_pmids), count)
 
@@ -375,7 +377,8 @@ def _mark_done(conn: psycopg.Connection, pmid: str, checksum: str) -> None:
             """,
             (checksum, pmid),
         )
-    conn.commit()
+    # No explicit commit — caller is responsible (either inside conn.transaction()
+    # or via explicit conn.commit() for the error path).
 
 
 def _mark_error(conn: psycopg.Connection, pmid: str, message: str) -> None:
