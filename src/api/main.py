@@ -339,9 +339,23 @@ async def health() -> dict:
 
 
 # ── Static files (frontend SPA) ───────────────────────────────────────────────
-# Mounted last so /api/v1/* routes take priority. html=True serves index.html
-# for "/" and lets the browser fetch style.css / app.js at root-relative paths.
 import pathlib as _pathlib
 _frontend_dir = _pathlib.Path(__file__).parent.parent.parent / "frontend"
+
+# Explicit routes for the three known frontend files — more reliable than
+# relying solely on a catch-all StaticFiles mount at "/".
+@app.get("/", include_in_schema=False)
+async def _serve_index():
+    return FileResponse(str(_frontend_dir / "index.html"))
+
+@app.get("/style.css", include_in_schema=False)
+async def _serve_css():
+    return FileResponse(str(_frontend_dir / "style.css"), media_type="text/css")
+
+@app.get("/app.js", include_in_schema=False)
+async def _serve_js():
+    return FileResponse(str(_frontend_dir / "app.js"), media_type="application/javascript")
+
+# StaticFiles handles any other assets (fonts, images, etc.)
 if _frontend_dir.exists():
-    app.mount("/", StaticFiles(directory=str(_frontend_dir), html=True), name="frontend")
+    app.mount("/", StaticFiles(directory=str(_frontend_dir)), name="frontend")
