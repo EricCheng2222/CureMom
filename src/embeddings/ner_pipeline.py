@@ -1,11 +1,11 @@
 """Biomedical NER over chunks — populates `paper_entities`.
 
-Uses scispaCy:
-  • `en_ner_bc5cdr_md` — DISEASE / CHEMICAL
-  • `en_core_sci_lg`   — general biomedical entities (genes, cell types, etc.)
+Uses a HuggingFace transformers BERT-based biomedical NER model. We pivoted
+from scispaCy because its current versions pin Python 3.10+, while the rest
+of the project still runs on 3.9.
 
-scispaCy is heavy (3–5 GB of model files) and adds noise to a fresh venv;
-keep it as an opt-in dep installed only on machines that run NER.
+Default model: `d4data/biomedical-ner-all` — covers diseases, chemicals,
+medications, anatomy, dosage, history, lab values, etc. (~110 MB).
 
 Typical usage:
     PYTHONPATH=. python scripts/extract_entities.py
@@ -22,16 +22,40 @@ from psycopg.rows import dict_row
 
 logger = logging.getLogger(__name__)
 
-# Mapping scispaCy labels → our normalized types in paper_entities.entity_type
+# Map raw HF NER labels to our normalized entity types.
+# d4data/biomedical-ner-all label set is broad — we collapse to the schema
+# used in paper_entities.entity_type.
 LABEL_MAP = {
-    "DISEASE":              "DISEASE",
-    "CHEMICAL":             "CHEMICAL",
-    "GENE_OR_GENE_PRODUCT": "GENE_OR_GENE_PRODUCT",
-    "CELL_TYPE":            "CELL_TYPE",
-    "ORGANISM":             "ORGANISM",
-    "PROTEIN":              "GENE_OR_GENE_PRODUCT",
-    "GENE":                 "GENE_OR_GENE_PRODUCT",
-    "CELL":                 "CELL_TYPE",
+    # d4data/biomedical-ner-all label set
+    "DISEASE_DISORDER":      "DISEASE",
+    "SIGN_SYMPTOM":          "SYMPTOM",
+    "MEDICATION":            "CHEMICAL",
+    "BIOLOGICAL_STRUCTURE":  "ANATOMY",          # tissues, organs, cell lines
+    "DIAGNOSTIC_PROCEDURE":  "PROCEDURE",
+    "THERAPEUTIC_PROCEDURE": "PROCEDURE",
+    # Everything below = drop (too generic / not useful for graph)
+    "DETAILED_DESCRIPTION":  None,
+    "BIOLOGICAL_ATTRIBUTE":  None,
+    "CLINICAL_EVENT":        None,
+    "LAB_VALUE":             None,
+    "FAMILY_HISTORY":        None,
+    "HISTORY":               None,
+    "AGE":                   None, "SEX": None,
+    "DURATION":              None, "FREQUENCY": None,
+    "DATE":                  None, "TIME": None,
+    "AREA":                  None, "VOLUME": None, "MASS": None, "DISTANCE": None,
+    "DOSAGE":                None,
+    "OUTCOME":               None,
+    "ADMINISTRATION":        None,
+    "PERSONAL_BACKGROUND":   None,
+    "ACTIVITY":              None, "SUBJECT": None, "SEVERITY": None, "COREFERENCE": None,
+    # Fallbacks for older / alternate models
+    "DISEASE":               "DISEASE",
+    "CHEMICAL":              "CHEMICAL",
+    "GENE":                  "GENE_OR_GENE_PRODUCT",
+    "PROTEIN":               "GENE_OR_GENE_PRODUCT",
+    "CELL":                  "CELL_TYPE",
+    "ORGANISM":              "ORGANISM",
 }
 
 
@@ -49,74 +73,94 @@ class ExtractedEntity:
 class _NERRunner:
     """Lazy wrapper — defers heavy imports until needed."""
 
-    def __init__(self, with_linker: bool = True):
-        try:
-            import spacy
-        except ImportError as exc:
-            raise RuntimeError(
-                "scispaCy not installed. Run:\n"
-                "  pip install scispacy\n"
-                "  pip install https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/releases/v0.5.4/en_core_sci_lg-0.5.4.tar.gz\n"
-                "  pip install https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/releases/v0.5.4/en_ner_bc5cdr_md-0.5.4.tar.gz"
-            ) from exc
+    def __init__(
+        self,
+        model_name: str = "d4data/biomedical-ner-all",
+        device: str | None = None,
+    ):
+        from transformers import AutoModelForTokenClassification, AutoTokenizer, pipeline
+        import torch
 
-        logger.info("Loading scispaCy models…")
-        self._nlp_general = spacy.load("en_core_sci_lg")
-        self._nlp_bc5cdr  = spacy.load("en_ner_bc5cdr_md")
+        if device is None:
+            if torch.backends.mps.is_available():
+                device = "mps"
+            elif torch.cuda.is_available():
+                device = "cuda"
+            else:
+                device = "cpu"
+        logger.info("Loading NER model %s on %s", model_name, device)
 
-        if with_linker:
-            try:
-                from scispacy.linking import EntityLinker  # noqa: F401
-                self._nlp_general.add_pipe(
-                    "scispacy_linker",
-                    config={"resolve_abbreviations": True, "linker_name": "umls"},
-                )
-                logger.info("UMLS linker attached.")
-            except Exception as exc:
-                logger.warning("scispaCy linker unavailable (%s) — entities will lack kb_id.", exc)
+        tok   = AutoTokenizer.from_pretrained(model_name)
+        model = AutoModelForTokenClassification.from_pretrained(model_name)
+        model.to(device).eval()
+
+        # device argument: pipeline accepts -1 for CPU, integer index for CUDA, "mps" string
+        device_arg: int | str
+        if device == "cpu":
+            device_arg = -1
+        elif device == "mps":
+            device_arg = device
+        else:
+            device_arg = 0  # cuda:0
+
+        self._pipe = pipeline(
+            task="ner",
+            model=model,
+            tokenizer=tok,
+            # 'first' uses the label of the first sub-token in each word and
+            # produces cleaner spans than 'simple'; 'max' picks the highest
+            # score across sub-tokens.
+            aggregation_strategy="first",
+            device=device_arg,
+        )
 
     def extract(self, text: str, paper_id: int, chunk_id: int) -> list[ExtractedEntity]:
+        if not text:
+            return []
+        try:
+            spans = self._pipe(text)
+        except Exception as exc:
+            logger.warning("NER pipeline failed on chunk %d (%s); skipping.", chunk_id, exc)
+            return []
+
         results: list[ExtractedEntity] = []
         seen: set[tuple[str, str, int]] = set()
 
-        # Pass 1 — disease/chemical via BC5CDR
-        for ent in self._nlp_bc5cdr(text).ents:
-            label = LABEL_MAP.get(ent.label_)
-            if not label:
+        for span in spans:
+            raw_label = span.get("entity_group") or span.get("entity") or ""
+            label = LABEL_MAP.get(raw_label.upper())
+            if label is None:
                 continue
-            key = (ent.text.lower(), label, ent.start_char)
+
+            # Re-extract text from the original string using the offsets so we
+            # avoid WordPiece-leftover '##' markers and get correct token spans.
+            start = int(span.get("start", 0))
+            end = int(span.get("end", start))
+            if end <= start:
+                continue
+            txt = text[start:end].strip()
+
+            # Filter junk:
+            #   - sub-word fragments and very short strings
+            #   - tokens that are pure stopwords or single non-letter chars
+            if len(txt) < 3 or txt.startswith("##"):
+                continue
+            if not any(ch.isalpha() for ch in txt):
+                continue
+            # Drop spans with score below a confidence threshold
+            score = float(span.get("score", 1.0))
+            if score < 0.5:
+                continue
+
+            key = (txt.lower(), label, start)
             if key in seen:
                 continue
             seen.add(key)
             results.append(ExtractedEntity(
                 paper_id=paper_id, chunk_id=chunk_id,
-                entity_text=ent.text, entity_type=label,
-                start_char=ent.start_char, end_char=ent.end_char,
+                entity_text=txt, entity_type=label,
+                start_char=start, end_char=end,
             ))
-
-        # Pass 2 — general biomedical (genes, cells, proteins)
-        doc = self._nlp_general(text)
-        for ent in doc.ents:
-            label = LABEL_MAP.get(ent.label_, "OTHER")
-            if label == "OTHER":
-                continue
-            key = (ent.text.lower(), label, ent.start_char)
-            if key in seen:
-                continue
-            seen.add(key)
-
-            kb_id: str | None = None
-            if hasattr(ent._, "kb_ents") and ent._.kb_ents:
-                # Highest-confidence UMLS CUI
-                kb_id = ent._.kb_ents[0][0]
-
-            results.append(ExtractedEntity(
-                paper_id=paper_id, chunk_id=chunk_id,
-                entity_text=ent.text, entity_type=label,
-                start_char=ent.start_char, end_char=ent.end_char,
-                kb_id=kb_id,
-            ))
-
         return results
 
 
@@ -124,7 +168,7 @@ def extract_entities_for_chunks(
     conn: psycopg.Connection,
     paper_ids: list[int] | None = None,
     limit: int | None = None,
-    with_linker: bool = False,
+    model_name: str = "d4data/biomedical-ner-all",
 ) -> int:
     """Extract entities for chunks lacking them. Returns total entities inserted."""
     where = (
@@ -141,7 +185,7 @@ def extract_entities_for_chunks(
     if limit:
         sql += f" LIMIT {int(limit)}"
 
-    runner = _NERRunner(with_linker=with_linker)
+    runner = _NERRunner(model_name=model_name)
     total = 0
 
     with conn.cursor(row_factory=dict_row) as cur:
@@ -156,21 +200,20 @@ def extract_entities_for_chunks(
         ents = runner.extract(row["chunk_text"] or "", row["paper_id"], row["chunk_id"])
         if ents:
             with conn.cursor() as cur:
-                for e in ents:
-                    cur.execute(
-                        """
-                        INSERT INTO paper_entities
-                            (paper_id, chunk_id, entity_text, entity_type,
-                             start_char, end_char, kb_id)
-                        VALUES (%s,%s,%s,%s,%s,%s,%s)
-                        """,
-                        (e.paper_id, e.chunk_id, e.entity_text, e.entity_type,
-                         e.start_char, e.end_char, e.kb_id),
-                    )
+                cur.executemany(
+                    """
+                    INSERT INTO paper_entities
+                        (paper_id, chunk_id, entity_text, entity_type,
+                         start_char, end_char, kb_id)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s)
+                    """,
+                    [(e.paper_id, e.chunk_id, e.entity_text, e.entity_type,
+                      e.start_char, e.end_char, e.kb_id) for e in ents],
+                )
             conn.commit()
             total += len(ents)
 
-        if i % 100 == 0:
+        if i % 100 == 0 or i == len(rows):
             logger.info("  processed %d / %d chunks (%d entities so far)", i, len(rows), total)
 
     return total

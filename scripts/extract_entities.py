@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""Run scispaCy NER over chunks and populate `paper_entities`.
+"""Run biomedical NER over chunks and populate `paper_entities`.
+
+Uses HuggingFace transformers (default model: d4data/biomedical-ner-all).
+First run downloads the model (~110 MB).
 
 Examples:
     PYTHONPATH=. python scripts/extract_entities.py
-    PYTHONPATH=. python scripts/extract_entities.py --paper-ids 1 2 --with-linker
+    PYTHONPATH=. python scripts/extract_entities.py --paper-ids 1 2
+    PYTHONPATH=. python scripts/extract_entities.py --model alvaroalon2/biobert_diseases_ner
 """
 
 from __future__ import annotations
@@ -34,8 +38,9 @@ def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--paper-ids", nargs="*", type=int, default=None)
     p.add_argument("--limit", type=int, default=None)
-    p.add_argument("--with-linker", action="store_true",
-                   help="Resolve entities to UMLS CUIs via the scispaCy linker (slower)")
+    p.add_argument("--model", default="d4data/biomedical-ner-all",
+                   help="HF model id; alternatives: alvaroalon2/biobert_diseases_ner, "
+                        "Clinical-AI-Apollo/Medical-NER")
     args = p.parse_args()
 
     conn = psycopg.connect(DB_DSN)
@@ -44,7 +49,7 @@ def main() -> None:
             conn,
             paper_ids=args.paper_ids,
             limit=args.limit,
-            with_linker=args.with_linker,
+            model_name=args.model,
         )
         logging.info("Extracted %d entities total.", n)
     finally:
