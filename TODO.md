@@ -107,6 +107,12 @@
 
 ## Infrastructure / Cross-cutting
 
+### ChEMBL compound-target integration (implemented — needs wiring)
+- [ ] Run `python scripts/fetch_chembl.py` after DB is up to populate `compounds`, `molecular_targets`, `compound_targets` tables and queue PubMed papers for all 30 defined targets
+- [ ] Add ChEMBL fetch to the recommended first-run sequence in README
+- [ ] Future: query ChEMBL by pharmacological action class (e.g. "Enzyme Inhibitors") instead of named targets — surfaces unknown compounds we haven't heard of
+- [ ] Future: cross-reference `compound_targets` with `paper_entities` (NER) to auto-score compound relevance to each condition from evidence
+
 ### Elasticsearch sync pipeline (`scripts/sync_es.py`)
 - [ ] Write script to sync papers from PostgreSQL → Elasticsearch index
   - Pull papers with `status=done` in ingestion_log, check if already in ES (by PMID), bulk-index missing ones

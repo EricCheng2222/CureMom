@@ -88,9 +88,9 @@ CREATE INDEX idx_mesh_tree_numbers ON mesh_terms USING GIN (tree_numbers);
 CREATE TABLE paper_mesh (
     paper_id        BIGINT NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
     mesh_id         INT NOT NULL REFERENCES mesh_terms(id),
-    qualifier_name  TEXT,
+    qualifier_name  TEXT NOT NULL DEFAULT '',
     is_major_topic  BOOLEAN DEFAULT FALSE,
-    PRIMARY KEY (paper_id, mesh_id, coalesce(qualifier_name, ''))
+    PRIMARY KEY (paper_id, mesh_id, qualifier_name)
 );
 
 CREATE INDEX idx_paper_mesh_mesh_id ON paper_mesh (mesh_id);
@@ -161,6 +161,61 @@ CREATE TABLE paper_entities (
 CREATE INDEX idx_entities_paper_id ON paper_entities (paper_id);
 CREATE INDEX idx_entities_type_text ON paper_entities (entity_type, entity_text);
 CREATE INDEX idx_entities_kb_id ON paper_entities (kb_id) WHERE kb_id IS NOT NULL;
+
+-- ─── ChEMBL compound-target layer ──────────────────────────────────────────
+-- Compounds discovered via target biology, not pre-assumed disease relevance.
+
+CREATE TABLE compounds (
+    id                  BIGSERIAL PRIMARY KEY,
+    chembl_id           VARCHAR(20) UNIQUE NOT NULL,
+    name                TEXT,
+    synonyms            TEXT[],
+    max_phase           SMALLINT,       -- 0=preclinical, 4=approved drug
+    molecule_type       TEXT,           -- Small molecule, Protein, Antibody, etc.
+    mechanism_of_action TEXT,
+    molecular_formula   TEXT,
+    molecular_weight    NUMERIC(10,3),
+    inchi_key           TEXT,
+    created_at          TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_compounds_chembl_id ON compounds (chembl_id);
+CREATE INDEX idx_compounds_name ON compounds USING GIN (to_tsvector('english', coalesce(name, '')));
+
+CREATE TABLE molecular_targets (
+    id              SERIAL PRIMARY KEY,
+    chembl_target_id VARCHAR(20) UNIQUE NOT NULL,
+    gene_name       TEXT NOT NULL,
+    pref_name       TEXT,
+    target_type     TEXT,
+    organism        TEXT DEFAULT 'Homo sapiens',
+    biology         TEXT[]          -- which biological domains (documentation)
+);
+
+CREATE INDEX idx_targets_gene ON molecular_targets (gene_name);
+
+CREATE TABLE compound_targets (
+    id              BIGSERIAL PRIMARY KEY,
+    compound_id     BIGINT NOT NULL REFERENCES compounds(id) ON DELETE CASCADE,
+    target_id       INT NOT NULL REFERENCES molecular_targets(id),
+    action_type     TEXT,           -- INHIBITOR, AGONIST, ANTAGONIST, MODULATOR, etc.
+    activity_type   TEXT,           -- IC50, Ki, Kd, EC50, etc.
+    activity_value  NUMERIC,        -- in nM
+    assay_type      TEXT,           -- B=binding, F=functional
+    confidence_score SMALLINT,      -- ChEMBL 0-9
+    document_year   INT,
+    UNIQUE (compound_id, target_id, activity_type)
+);
+
+CREATE INDEX idx_compound_targets_compound ON compound_targets (compound_id);
+CREATE INDEX idx_compound_targets_target ON compound_targets (target_id);
+
+-- Links compounds discovered via ChEMBL to PubMed papers fetched for them
+CREATE TABLE compound_papers (
+    compound_id     BIGINT NOT NULL REFERENCES compounds(id) ON DELETE CASCADE,
+    pmid            VARCHAR(20) NOT NULL,
+    PRIMARY KEY (compound_id, pmid)
+);
 
 -- ─── Entity co-occurrence graph (Phase 4: HippoRAG) ─────────────────────────
 
