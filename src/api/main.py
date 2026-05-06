@@ -48,7 +48,8 @@ ES_HOST = os.environ.get("ES_HOST", "http://localhost:9200")
 _es: Elasticsearch | None = None
 _retriever: HybridRetriever | None = None
 _mesh_expander: MeSHExpander | None = None
-_embedder: Any = None  # PubMedBERT — loaded lazily on first hybrid query
+_embedder: Any = None      # PubMedBERT — loaded lazily on first hybrid query
+_hipporag: Any = None      # HippoRAG retriever — loaded lazily on first request that needs it
 
 
 @asynccontextmanager
@@ -114,7 +115,7 @@ class QueryFilters(BaseModel):
 
 class QueryOptions(BaseModel):
     top_k: int = Field(default=10, ge=1, le=50)
-    retrieval_strategy: str = Field(default="bm25", pattern="^(bm25|hybrid)$")
+    retrieval_strategy: str = Field(default="bm25", pattern="^(bm25|hybrid|hipporag|full)$")
     include_full_passages: bool = True
     llm_provider: str | None = None   # override LLM_PROVIDER env var
 
@@ -137,7 +138,9 @@ async def query(
     start = time.monotonic()
 
     filter_dict = req.filters.model_dump(exclude_none=False)
-    dense_weight = 0.5 if req.options.retrieval_strategy == "hybrid" else 0.0
+    strategy = req.options.retrieval_strategy
+    dense_weight = 0.5 if strategy in ("hybrid", "full") else 0.0
+    use_hipporag = strategy in ("hipporag", "full")
     query_embedding: list[float] | None = None
 
     if dense_weight > 0:
@@ -154,12 +157,25 @@ async def query(
             )
             dense_weight = 0.0
 
+    if use_hipporag:
+        try:
+            global _hipporag
+            if _hipporag is None:
+                from ..search.hipporag import HippoRAGRetriever
+                logger.info("Loading HippoRAG entity graph (one-time)…")
+                _hipporag = HippoRAGRetriever(DB_DSN)
+            retriever._hipporag = _hipporag
+        except Exception as exc:
+            logger.warning("HippoRAG unavailable (%s); skipping graph re-rank.", exc)
+            use_hipporag = False
+
     chunks = retriever.retrieve(
         query=req.query,
         filters=filter_dict,
         top_k=req.options.top_k,
         dense_weight=dense_weight,
         query_embedding=query_embedding,
+        use_hipporag=use_hipporag,
     )
 
     if not chunks:

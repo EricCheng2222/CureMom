@@ -157,6 +157,29 @@ PYTHONPATH=. python scripts/extract_entities.py
 PYTHONPATH=. python scripts/extract_entities.py --with-linker
 ```
 
+### 10. (Phase 4 — optional) Build the entity graph for HippoRAG retrieval
+
+After NER populates `paper_entities`, build the co-occurrence graph that
+HippoRAG's Personalized PageRank traverses at query time.
+
+```bash
+PYTHONPATH=. python scripts/build_entity_graph.py
+```
+
+Then call the API with `retrieval_strategy: "hipporag"` (entity-graph rerank
+on top of BM25) or `"full"` (BM25 + dense + HippoRAG combined).
+
+```bash
+curl -X POST http://localhost:8000/api/v1/query \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"What drugs target the complement pathway in lupus nephritis?",
+       "options":{"retrieval_strategy":"full","top_k":10,"llm_provider":"claude"}}'
+```
+
+Multi-hop questions like the example above benefit most from `hipporag`/`full`
+because PPR surfaces chunks that *bridge* the query entities ("complement",
+"drug", "lupus", "nephritis") even if no single chunk mentions all four.
+
 ---
 
 ## API Usage

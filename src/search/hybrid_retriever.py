@@ -59,10 +59,12 @@ class HybridRetriever:
         db_dsn: str,
         es: Elasticsearch,
         mesh_expander: MeSHExpander | None = None,
+        hipporag=None,  # Optional HippoRAGRetriever for entity-graph re-ranking
     ) -> None:
         self._db_dsn = db_dsn
         self._es = es
         self._mesh_expander = mesh_expander
+        self._hipporag = hipporag
         self._conn: psycopg.Connection | None = None
 
     def _get_conn(self) -> psycopg.Connection:
@@ -168,6 +170,8 @@ class HybridRetriever:
         top_k: int = 10,
         dense_weight: float = 0.0,  # 0.0 = BM25 only; 0.5 = hybrid
         query_embedding: list[float] | None = None,
+        use_hipporag: bool = False,
+        hipporag_weight: float = 0.3,
     ) -> list[RetrievedChunk]:
         """Main retrieval method.
 
@@ -196,11 +200,40 @@ class HybridRetriever:
             scored.append((pmid, score))
 
         scored.sort(key=lambda x: x[1], reverse=True)
-        top_pmids = [pmid for pmid, _ in scored[:top_k]]
+        # Pull more candidates than top_k so HippoRAG re-ranking has room to work
+        candidate_pool_size = top_k * 3 if (use_hipporag and self._hipporag) else top_k
+        top_pmids = [pmid for pmid, _ in scored[:candidate_pool_size]]
         score_map = dict(scored)
 
         # Fetch chunks from DB
         chunks_by_pmid = self._fetch_chunks_by_pmids(top_pmids)
+
+        # HippoRAG entity-graph re-ranking
+        if use_hipporag and self._hipporag is not None:
+            try:
+                from .hipporag import extract_query_entities
+                query_entities = extract_query_entities(query)
+                all_chunk_ids = [c["chunk_id"] for cs in chunks_by_pmid.values() for c in cs]
+                hipporag_boosts = self._hipporag.rerank_chunks(all_chunk_ids, query_entities)
+                # Aggregate the per-chunk boosts back to per-PMID
+                pmid_boost: dict[str, float] = {}
+                for pmid, cs in chunks_by_pmid.items():
+                    pmid_boost[pmid] = max(
+                        (hipporag_boosts.get(c["chunk_id"], 0.0) for c in cs),
+                        default=0.0,
+                    )
+                # Combine with RRF score and re-sort
+                combined = sorted(
+                    top_pmids,
+                    key=lambda p: score_map.get(p, 0.0) + hipporag_weight * pmid_boost.get(p, 0.0),
+                    reverse=True,
+                )
+                top_pmids = combined[:top_k]
+            except Exception as exc:
+                logger.warning("HippoRAG re-rank failed (%s); using base ranking.", exc)
+                top_pmids = top_pmids[:top_k]
+        else:
+            top_pmids = top_pmids[:top_k]
 
         results: list[RetrievedChunk] = []
         for pmid in top_pmids:
