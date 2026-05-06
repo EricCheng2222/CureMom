@@ -394,6 +394,27 @@ async def health() -> dict:
     return {"status": "ok"}
 
 
+@app.post("/api/v1/hipporag/reload", include_in_schema=True)
+async def reload_hipporag() -> dict:
+    """Reload the HippoRAG entity graph from the DB.
+
+    Call this after `scripts/build_entity_graph.py` rebuilds the graph so
+    the running server picks up the new edges without a full restart.
+    """
+    global _hipporag
+    if _hipporag is None:
+        from ..search.hipporag import HippoRAGRetriever
+        _hipporag = HippoRAGRetriever(DB_DSN)
+    _hipporag.reload()
+    # Touch _ensure_loaded() to immediately rebuild
+    _hipporag._ensure_loaded()
+    return {
+        "status": "reloaded",
+        "nodes": _hipporag._graph.number_of_nodes() if _hipporag._graph else 0,
+        "edges": _hipporag._graph.number_of_edges() if _hipporag._graph else 0,
+    }
+
+
 @app.get("/api/v1/llm/status")
 async def llm_status() -> dict:
     """Report which providers are configured and reachable."""
