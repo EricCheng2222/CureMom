@@ -140,9 +140,10 @@ class OllamaProvider(LLMProvider):
                 {"role": "user", "content": user_message},
             ],
             "stream": False,
-            # 8K window — meditron's default 2048 truncates long retrieval contexts.
-            # First request reloads the model (~10s); subsequent ones are fast.
-            "options": {"num_ctx": 8192},
+            # 32K window — Gemma 4 supports long context; large enough that
+            # 8+ chunks (each ~500 tokens) fit with room for system prompt,
+            # question, and response. First request reloads the model (~10s).
+            "options": {"num_ctx": 32768},
         }
 
         # Generous timeout: first call reloads model with new context window;
