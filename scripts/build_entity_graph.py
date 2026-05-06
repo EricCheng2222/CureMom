@@ -31,7 +31,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import psycopg
 
-from src.search.hipporag import build_entity_graph, build_mesh_graph
+from src.search.hipporag import build_entity_graph, build_mesh_graph, merge_ner_into_graph
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -58,10 +58,11 @@ def main() -> None:
         elif args.source == "ner":
             n = build_entity_graph(conn)
             log.info("NER graph: %d edges.", n)
-        else:
+        else:  # both
             n_mesh = build_mesh_graph(conn)
             log.info("MeSH graph: %d edges.", n_mesh)
-            log.info("NER graph would overwrite — skipping. Run --source ner separately to add NER entities.")
+            n_ner = merge_ner_into_graph(conn)
+            log.info("Merged %d NER entity-pair upserts on top.", n_ner)
     finally:
         conn.close()
 

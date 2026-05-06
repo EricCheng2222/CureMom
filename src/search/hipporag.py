@@ -79,6 +79,58 @@ def build_mesh_graph(conn: psycopg.Connection, batch_size: int = 5000) -> int:
     return inserted
 
 
+def merge_ner_into_graph(conn: psycopg.Connection) -> int:
+    """Merge paper_entities co-occurrences into the existing entity_graph.
+
+    Use this AFTER build_mesh_graph() if you want both MeSH and NER edges
+    in one graph. Edges that already exist (from MeSH) are augmented with
+    NER co-occurrence counts; new NER-only edges are inserted.
+    """
+    logger.info("Merging NER entities into entity_graph…")
+
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            SELECT chunk_id, paper_id, LOWER(entity_text) AS entity
+            FROM paper_entities
+            WHERE chunk_id IS NOT NULL
+            """
+        )
+        rows = cur.fetchall()
+    if not rows:
+        logger.warning("paper_entities is empty — nothing to merge.")
+        return 0
+
+    by_chunk: dict[int, list[dict]] = defaultdict(list)
+    for r in rows:
+        by_chunk[r["chunk_id"]].append(r)
+
+    upserts = 0
+    with conn.cursor() as cur:
+        for chunk_id, ents in by_chunk.items():
+            unique = list({e["entity"]: e["paper_id"] for e in ents}.items())
+            for i in range(len(unique)):
+                for j in range(i + 1, len(unique)):
+                    a, b = sorted([unique[i][0], unique[j][0]])
+                    if a == b:
+                        continue
+                    cur.execute(
+                        """
+                        INSERT INTO entity_graph (entity_a, entity_b, co_occurrences, paper_ids)
+                        VALUES (%s, %s, 1, ARRAY[%s,%s]::bigint[])
+                        ON CONFLICT (entity_a, entity_b) DO UPDATE
+                            SET co_occurrences = entity_graph.co_occurrences + 1,
+                                paper_ids = (
+                                    SELECT ARRAY(SELECT DISTINCT unnest(entity_graph.paper_ids || EXCLUDED.paper_ids))
+                                )
+                        """,
+                        (a, b, unique[i][1], unique[j][1]),
+                    )
+                    upserts += 1
+    conn.commit()
+    return upserts
+
+
 def update_entity_graph_for_papers(
     conn: psycopg.Connection,
     paper_ids: list[int],
