@@ -140,9 +140,14 @@ class OllamaProvider(LLMProvider):
                 {"role": "user", "content": user_message},
             ],
             "stream": False,
+            # 8K window — meditron's default 2048 truncates long retrieval contexts.
+            # First request reloads the model (~10s); subsequent ones are fast.
+            "options": {"num_ctx": 8192},
         }
 
-        with httpx.Client(timeout=120) as client:
+        # Generous timeout: first call reloads model with new context window;
+        # local 7B on M-series typically generates 30-60 tokens/sec.
+        with httpx.Client(timeout=httpx.Timeout(connect=10.0, read=600.0, write=10.0, pool=10.0)) as client:
             response = client.post(f"{self._base_url}/api/chat", json=payload)
             if response.status_code != 200:
                 # Surface Ollama's actual error message (e.g. "model 'X' not found")
