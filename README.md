@@ -221,6 +221,8 @@ Dockerfile
 
 ## Ingestion Topics
 
+### Autoimmune / SLE
+
 | Name | Description | Priority |
 |---|---|---|
 | `sle_core` | Systemic Lupus Erythematosus core | 1 |
@@ -230,6 +232,16 @@ Dockerfile
 | `sjogrens` | Sjögren's syndrome | 2 |
 | `complement_system` | Complement system in autoimmune disease | 2 |
 | `autoimmune_broad` | Broad autoimmune + SLE/lupus | 3 |
+
+### Muscle Physiology
+
+| Name | Description | Priority |
+|---|---|---|
+| `muscle_hypertrophy` | Skeletal muscle hypertrophy — growth, adaptation, signalling | 1 |
+| `protein_synthesis` | Muscle protein synthesis — mTOR, ribosomes, amino acid signalling | 1 |
+| `resistance_training` | Resistance training effects on muscle mass and protein turnover | 2 |
+| `mtor_signaling` | mTORC1 pathway in muscle anabolism | 2 |
+| `amino_acid_muscle` | Amino acid regulation of MPS (leucine, EAAs, whey) | 2 |
 
 Add new topics in `src/ingestion/topics.py`.
 

@@ -1,4 +1,9 @@
-"""SLE and autoimmune topic definitions for targeted PubMed ingestion."""
+"""Topic definitions for targeted PubMed ingestion.
+
+Domains:
+  - Autoimmune / SLE
+  - Muscle physiology (hypertrophy, protein synthesis)
+"""
 
 from dataclasses import dataclass, field
 
@@ -53,6 +58,39 @@ TOPICS: list[IngestionTopic] = [
         mesh_query='"Autoimmune Diseases"[MeSH] AND ("lupus"[Title/Abstract] OR "SLE"[Title/Abstract])',
         description="Broad autoimmune disease literature mentioning lupus/SLE",
         priority=3,
+    ),
+
+    # ── Muscle physiology ─────────────────────────────────────────────────────
+
+    IngestionTopic(
+        name="muscle_hypertrophy",
+        mesh_query='"Muscle Development"[MeSH] OR "Hypertrophy"[MeSH] AND "Muscle, Skeletal"[MeSH]',
+        description="Skeletal muscle hypertrophy — growth, adaptation, signalling",
+        priority=1,
+    ),
+    IngestionTopic(
+        name="protein_synthesis",
+        mesh_query='"Protein Biosynthesis"[MeSH] AND ("muscle"[Title/Abstract] OR "skeletal"[Title/Abstract] OR "exercise"[Title/Abstract])',
+        description="Muscle protein synthesis — mTOR, ribosomal biogenesis, amino acid signalling",
+        priority=1,
+    ),
+    IngestionTopic(
+        name="resistance_training",
+        mesh_query='"Resistance Training"[MeSH] AND ("hypertrophy"[Title/Abstract] OR "protein synthesis"[Title/Abstract] OR "muscle mass"[Title/Abstract])',
+        description="Resistance training effects on muscle mass and protein turnover",
+        priority=2,
+    ),
+    IngestionTopic(
+        name="mtor_signaling",
+        mesh_query='"TOR Serine-Threonine Kinases"[MeSH] AND ("muscle"[Title/Abstract] OR "hypertrophy"[Title/Abstract] OR "anabolism"[Title/Abstract])',
+        description="mTORC1 pathway in muscle anabolism",
+        priority=2,
+    ),
+    IngestionTopic(
+        name="amino_acid_muscle",
+        mesh_query='"Amino Acids"[MeSH] AND "Muscle, Skeletal"[MeSH] AND ("protein synthesis"[Title/Abstract] OR "anabolic"[Title/Abstract])',
+        description="Amino acid regulation of muscle protein synthesis (leucine, EAAs, whey)",
+        priority=2,
     ),
 ]
 

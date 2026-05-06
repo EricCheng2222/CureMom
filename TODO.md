@@ -145,6 +145,9 @@
 
 ### Expand topic coverage (after Phase 1 is stable)
 - [ ] Ingest priority-2 topics: `cutaneous_lupus`, `antiphospholipid`, `sjogrens`, `complement_system`
-- [ ] Add new topic: `"Rheumatoid Arthritis"[MeSH]` (high overlap with SLE research)
-- [ ] Add new topic: `"Myositis"[MeSH]`
-- [ ] Add new topic: `"Systemic Sclerosis"[MeSH]`
+- [ ] Ingest priority-2 muscle topics: `resistance_training`, `mtor_signaling`, `amino_acid_muscle`
+- [ ] Add new autoimmune topic: `"Rheumatoid Arthritis"[MeSH]` (high overlap with SLE research)
+- [ ] Add new autoimmune topic: `"Myositis"[MeSH]`
+- [ ] Add new autoimmune topic: `"Systemic Sclerosis"[MeSH]`
+- [ ] Add new muscle topic: `"Sarcopenia"[MeSH]` (muscle loss — inverse of hypertrophy)
+- [ ] Add new muscle topic: `"Exercise"[MeSH] AND "Gene Expression"[MeSH]` (transcriptomics of training)
