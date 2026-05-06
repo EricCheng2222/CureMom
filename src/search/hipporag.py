@@ -79,12 +79,14 @@ def build_mesh_graph(conn: psycopg.Connection, batch_size: int = 5000) -> int:
     return inserted
 
 
-def merge_ner_into_graph(conn: psycopg.Connection) -> int:
+def merge_ner_into_graph(conn: psycopg.Connection, batch_size: int = 10000) -> int:
     """Merge paper_entities co-occurrences into the existing entity_graph.
 
-    Use this AFTER build_mesh_graph() if you want both MeSH and NER edges
-    in one graph. Edges that already exist (from MeSH) are augmented with
-    NER co-occurrence counts; new NER-only edges are inserted.
+    Aggregates counts in Python first (so each (a,b) pair only requires one
+    DB upsert), then bulk-upserts in batches.
+
+    Use this AFTER build_mesh_graph() to add fine-grained NER entities on
+    top of the MeSH skeleton.
     """
     logger.info("Merging NER entities into entity_graph…")
 
@@ -100,34 +102,56 @@ def merge_ner_into_graph(conn: psycopg.Connection) -> int:
     if not rows:
         logger.warning("paper_entities is empty — nothing to merge.")
         return 0
+    logger.info("Loaded %d entity rows; aggregating pairs in memory…", len(rows))
 
-    by_chunk: dict[int, list[dict]] = defaultdict(list)
+    # Group by chunk, then enumerate pairs and aggregate counts + paper sets
+    by_chunk: dict[int, dict[str, int]] = defaultdict(dict)
     for r in rows:
-        by_chunk[r["chunk_id"]].append(r)
+        # dedupe entity text within a chunk
+        by_chunk[r["chunk_id"]].setdefault(r["entity"], r["paper_id"])
 
+    pair_count: dict[tuple[str, str], int] = defaultdict(int)
+    pair_papers: dict[tuple[str, str], set[int]] = defaultdict(set)
+    for ents in by_chunk.values():
+        items = list(ents.items())
+        n = len(items)
+        for i in range(n):
+            for j in range(i + 1, n):
+                ea, pa = items[i]
+                eb, pb = items[j]
+                a, b = (ea, eb) if ea < eb else (eb, ea)
+                if a == b:
+                    continue
+                pair_count[(a, b)] += 1
+                pair_papers[(a, b)].add(pa)
+                pair_papers[(a, b)].add(pb)
+
+    logger.info("Upserting %d unique entity pairs…", len(pair_count))
+
+    pairs = list(pair_count.items())
     upserts = 0
     with conn.cursor() as cur:
-        for chunk_id, ents in by_chunk.items():
-            unique = list({e["entity"]: e["paper_id"] for e in ents}.items())
-            for i in range(len(unique)):
-                for j in range(i + 1, len(unique)):
-                    a, b = sorted([unique[i][0], unique[j][0]])
-                    if a == b:
-                        continue
-                    cur.execute(
-                        """
-                        INSERT INTO entity_graph (entity_a, entity_b, co_occurrences, paper_ids)
-                        VALUES (%s, %s, 1, ARRAY[%s,%s]::bigint[])
-                        ON CONFLICT (entity_a, entity_b) DO UPDATE
-                            SET co_occurrences = entity_graph.co_occurrences + 1,
-                                paper_ids = (
-                                    SELECT ARRAY(SELECT DISTINCT unnest(entity_graph.paper_ids || EXCLUDED.paper_ids))
-                                )
-                        """,
-                        (a, b, unique[i][1], unique[j][1]),
-                    )
-                    upserts += 1
-    conn.commit()
+        for i in range(0, len(pairs), batch_size):
+            batch = pairs[i:i + batch_size]
+            cur.executemany(
+                """
+                INSERT INTO entity_graph (entity_a, entity_b, co_occurrences, paper_ids)
+                VALUES (%s, %s, %s, %s::bigint[])
+                ON CONFLICT (entity_a, entity_b) DO UPDATE
+                    SET co_occurrences = entity_graph.co_occurrences + EXCLUDED.co_occurrences,
+                        paper_ids = (
+                            SELECT ARRAY(SELECT DISTINCT unnest(entity_graph.paper_ids || EXCLUDED.paper_ids))
+                        )
+                """,
+                [
+                    (a, b, cnt, list(pair_papers[(a, b)]))
+                    for ((a, b), cnt) in batch
+                ],
+            )
+            conn.commit()
+            upserts += len(batch)
+            if upserts % (batch_size * 10) == 0 or upserts >= len(pairs):
+                logger.info("  %d / %d pairs upserted", upserts, len(pairs))
     return upserts
 
 
