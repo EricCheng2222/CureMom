@@ -142,20 +142,24 @@ The first run downloads `microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract-fu
 
 ### 9. (Phase 2 — optional) Extract biomedical entities (for Phase 4 graph)
 
-scispaCy NER over each chunk identifies diseases, chemicals, genes, and cell
-types. Output rows in `paper_entities` are the substrate for Phase 4's
+A HuggingFace transformer NER model (`d4data/biomedical-ner-all`, ~110 MB)
+identifies diseases, chemicals, anatomy, and other biomedical entities in
+each chunk. Output rows in `paper_entities` are the substrate for Phase 4's
 HippoRAG entity-graph traversal.
 
-```bash
-# scispaCy adds ~3 GB of model files; install only on machines that run NER
-pip install scispacy
-pip install https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/releases/v0.5.4/en_core_sci_lg-0.5.4.tar.gz
-pip install https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/releases/v0.5.4/en_ner_bc5cdr_md-0.5.4.tar.gz
+We pivoted away from scispaCy because its current versions pin Python 3.10+,
+while this project still runs on 3.9. The HF model uses the same
+`transformers + torch` stack as the embeddings pipeline.
 
+```bash
 PYTHONPATH=. python scripts/extract_entities.py
-# Or with UMLS CUI resolution (slower, downloads UMLS index on first use):
-PYTHONPATH=. python scripts/extract_entities.py --with-linker
+# Limit to specific papers for incremental updates:
+PYTHONPATH=. python scripts/extract_entities.py --paper-ids 1 2 3
+# Try alternative models:
+PYTHONPATH=. python scripts/extract_entities.py --model alvaroalon2/biobert_diseases_ner
 ```
+
+Expect ~600 ms/chunk on M-series MPS. For 33K chunks that's ~5–6 hours.
 
 ### 10. (Phase 4 — optional) Build the entity graph for HippoRAG retrieval
 
