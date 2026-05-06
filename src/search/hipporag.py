@@ -33,6 +33,52 @@ class EntityHit:
     kb_id: str | None = None
 
 
+def build_mesh_graph(conn: psycopg.Connection, batch_size: int = 5000) -> int:
+    """Build the entity graph from MeSH co-occurrence on shared papers.
+
+    This is a NER-free shortcut: MeSH descriptors are already curated,
+    normalized biomedical entities attached to every PubMed paper. Two
+    descriptors get an edge if they co-occur on the same paper; weight is
+    the number of papers they share.
+
+    Use this to bootstrap HippoRAG immediately instead of waiting for
+    scispaCy NER. Run scispaCy later for finer-grained entities (chemicals
+    / specific gene products that aren't in MeSH).
+    """
+    logger.info("Building entity graph from MeSH co-occurrences…")
+
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM entity_graph")
+
+    # Aggregate MeSH pairs per paper, then count over all papers
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO entity_graph (entity_a, entity_b, co_occurrences, paper_ids)
+            SELECT
+                LEAST(LOWER(m1.descriptor_name), LOWER(m2.descriptor_name)) AS entity_a,
+                GREATEST(LOWER(m1.descriptor_name), LOWER(m2.descriptor_name)) AS entity_b,
+                COUNT(DISTINCT pm1.paper_id) AS co_occurrences,
+                ARRAY_AGG(DISTINCT pm1.paper_id) AS paper_ids
+            FROM paper_mesh pm1
+            JOIN paper_mesh pm2 ON pm1.paper_id = pm2.paper_id AND pm1.mesh_id < pm2.mesh_id
+            JOIN mesh_terms m1 ON pm1.mesh_id = m1.id
+            JOIN mesh_terms m2 ON pm2.mesh_id = m2.id
+            WHERE m1.descriptor_name IS NOT NULL
+              AND m2.descriptor_name IS NOT NULL
+            GROUP BY entity_a, entity_b
+            HAVING COUNT(DISTINCT pm1.paper_id) >= 2
+            ON CONFLICT (entity_a, entity_b) DO UPDATE
+                SET co_occurrences = EXCLUDED.co_occurrences,
+                    paper_ids = EXCLUDED.paper_ids
+            """
+        )
+        inserted = cur.rowcount
+    conn.commit()
+    logger.info("MeSH graph built: %d edges", inserted)
+    return inserted
+
+
 def update_entity_graph_for_papers(
     conn: psycopg.Connection,
     paper_ids: list[int],
