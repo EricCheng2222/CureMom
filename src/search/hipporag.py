@@ -33,6 +33,60 @@ class EntityHit:
     kb_id: str | None = None
 
 
+def update_entity_graph_for_papers(
+    conn: psycopg.Connection,
+    paper_ids: list[int],
+) -> int:
+    """Incrementally upsert entity_graph edges for a small set of papers.
+
+    Cost is roughly O(papers × entities_per_chunk²). Use this from the
+    ingestion pipeline after each paper finishes NER, instead of doing a full
+    rebuild. Returns the number of edge upserts.
+    """
+    if not paper_ids:
+        return 0
+
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            SELECT chunk_id, paper_id, LOWER(entity_text) AS entity
+            FROM paper_entities
+            WHERE paper_id = ANY(%s) AND chunk_id IS NOT NULL
+            """,
+            (paper_ids,),
+        )
+        rows = cur.fetchall()
+
+    by_chunk: dict[int, list[dict]] = defaultdict(list)
+    for r in rows:
+        by_chunk[r["chunk_id"]].append(r)
+
+    upserts = 0
+    with conn.cursor() as cur:
+        for chunk_id, ents in by_chunk.items():
+            unique = list({e["entity"]: e["paper_id"] for e in ents}.items())
+            for i in range(len(unique)):
+                for j in range(i + 1, len(unique)):
+                    a, b = sorted([unique[i][0], unique[j][0]])
+                    if a == b:
+                        continue
+                    cur.execute(
+                        """
+                        INSERT INTO entity_graph (entity_a, entity_b, co_occurrences, paper_ids)
+                        VALUES (%s, %s, 1, ARRAY[%s,%s]::bigint[])
+                        ON CONFLICT (entity_a, entity_b) DO UPDATE
+                            SET co_occurrences = entity_graph.co_occurrences + 1,
+                                paper_ids = (
+                                    SELECT ARRAY(SELECT DISTINCT unnest(entity_graph.paper_ids || EXCLUDED.paper_ids))
+                                )
+                        """,
+                        (a, b, unique[i][1], unique[j][1]),
+                    )
+                    upserts += 1
+    conn.commit()
+    return upserts
+
+
 def build_entity_graph(conn: psycopg.Connection, batch_size: int = 5000) -> int:
     """Populate `entity_graph` from `paper_entities` co-occurrences.
 

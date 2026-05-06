@@ -163,11 +163,17 @@ After NER populates `paper_entities`, build the co-occurrence graph that
 HippoRAG's Personalized PageRank traverses at query time.
 
 ```bash
+# One-time full build (5–10 min for 33K papers; scales linearly)
 PYTHONPATH=. python scripts/build_entity_graph.py
 ```
 
+For a live system, prefer **incremental updates** as new papers are ingested
+(milliseconds per paper) instead of repeated full rebuilds — call
+`src.search.hipporag.update_entity_graph_for_papers(conn, [paper_ids])` after
+each NER batch. Schedule a full rebuild nightly or weekly to compact the table.
+
 Then call the API with `retrieval_strategy: "hipporag"` (entity-graph rerank
-on top of BM25) or `"full"` (BM25 + dense + HippoRAG combined).
+on top of BM25) or `"full"` (BM25 + dense + HippoRAG combined — the default).
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/query \
