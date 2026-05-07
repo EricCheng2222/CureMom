@@ -123,41 +123,49 @@ function appendAIBubble(text, citations) {
   const d = document.createElement('div');
   d.className = 'msg msg-ai';
 
-  // Pull off the follow-up section before linkifying. Accepts loose formatting:
-  //   "**You might also want to know:**"  (markdown bold)
-  //   "## Follow-up questions"             (heading)
-  //   "Suggested questions:" / "Related questions:"
-  //   marker followed by either newlines+bullets OR all inline on one line
+  // Pull off the follow-up section before linkifying. Accepts:
+  //   "**You might also want to know:**" / plain "You might also want to know:"
+  //   "## Follow-up questions" / "Suggested questions:" / "Related questions:"
+  //   marker followed by either newline-bullets OR inline " - " separators
+  // No boundary anchor — the LLM sometimes places the marker right after a
+  // citation marker ([4]) instead of sentence-ending punctuation. We rely on
+  // the marker phrase itself being distinctive enough.
   let mainText = text;
   let followups = [];
   const markerRe = new RegExp(
-    String.raw`(?:^|\n|\.|\!|\?)\s*(?:\*+|#+)?\s*` +
+    String.raw`(?:\*{0,2}|#+)\s*` +
     String.raw`(?:you\s+might\s+also\s+want\s+to\s+know|` +
     String.raw`follow[-\s]?up\s+questions|` +
     String.raw`suggested\s+questions|` +
     String.raw`related\s+questions|` +
     String.raw`questions?\s+you\s+might\s+(?:ask|consider|wonder))` +
-    String.raw`\s*:?\s*\*+?\s*`,
-    'i'
+    String.raw`\s*:?\s*\*{0,2}\s*`,
+    'gi'
   );
+  // Take the FIRST match — strip everything after it from the bubble
+  // (handles cases where the model duplicates its answer + follow-ups).
   const m = markerRe.exec(text);
   if (m) {
-    // mainText = everything before the marker (re-include the punctuation we
-    // matched as a leading boundary, e.g. the "." after "decisions").
-    const boundary = m[0][0];
-    mainText = (text.slice(0, m.index) + (boundary.match(/[.!?]/) ? boundary : '')).trimEnd();
+    mainText = text.slice(0, m.index).trimEnd();
     let tail = text.slice(m.index + m[0].length).trim();
+
+    // Drop a duplicate Answer/Conclusion/etc. block if present
+    tail = tail.split(
+      /\n*\s*\*{0,2}\s*(?:answer|conclusion|in\s+summary|to\s+summari[sz]e)\s*:?\s*\*{0,2}\s*\n/i
+    )[0];
 
     // Try newline-separated bullets first
     let items = tail.split(/\n+/).map(l => l.trim()).filter(Boolean);
     // Fall back to inline " - " / " • " separators if everything's on one line
-    if (items.length === 1 && /\s[-•*]\s/.test(items[0])) {
-      items = items[0].split(/\s+[-•*]\s+/).filter(Boolean);
+    if (items.length <= 1 && /\s[-•*]\s/.test(tail)) {
+      items = tail.split(/\s+[-•*]\s+/).filter(Boolean);
     }
 
     followups = items
       .map(l => l.replace(/^\s*[-•→*\d.]+\s*/, '').replace(/\*+/g, '').trim())
-      .filter(l => l.length > 5 && l.length < 250);
+      .filter(l => l.length > 5 && l.length < 250)
+      // Dedupe in case the model repeated the same questions
+      .filter((q, i, arr) => arr.indexOf(q) === i);
   }
 
   const linked = mainText.replace(/\[(\d+)\]/g, (_, n) => {
