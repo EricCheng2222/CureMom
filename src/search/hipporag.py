@@ -385,20 +385,33 @@ class HippoRAGRetriever:
         }
 
 
-def extract_query_entities(query: str) -> list[str]:
-    """Extract entities from a query using scispaCy. Returns lowercased entity strings.
+# Cache: None = not tried yet; False = unavailable; nlp object = loaded.
+# Avoids re-importing on every query and silences the per-call warning.
+_query_nlp: object | None | bool = None
 
-    Lazy-imports scispaCy so this module can still be imported when scispaCy
-    isn't installed (graph operations work without NER).
+
+def extract_query_entities(query: str) -> list[str]:
+    """Extract entities from a query for HippoRAG seeding.
+
+    Tries scispaCy once on first call; caches the result. Falls back to a
+    cheap keyword extractor (silent after the first attempt) when scispaCy
+    isn't installed — which is the normal case on Python 3.9, since scispaCy
+    pins Python 3.10+.
     """
-    try:
-        import spacy
-        nlp = spacy.load("en_ner_bc5cdr_md")
-    except Exception as exc:
-        logger.warning("scispaCy unavailable for query NER (%s); falling back to keywords.", exc)
+    global _query_nlp
+    if _query_nlp is None:
+        try:
+            import spacy
+            _query_nlp = spacy.load("en_ner_bc5cdr_md")
+            logger.info("scispaCy loaded for query-time NER.")
+        except Exception:
+            _query_nlp = False
+            logger.info("scispaCy not available — using keyword fallback for query NER.")
+
+    if _query_nlp is False:
         return _fallback_keywords(query)
 
-    doc = nlp(query)
+    doc = _query_nlp(query)
     return [ent.text.lower() for ent in doc.ents]
 
 
