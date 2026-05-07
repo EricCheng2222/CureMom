@@ -208,30 +208,25 @@ class HybridRetriever:
         # Fetch chunks from DB
         chunks_by_pmid = self._fetch_chunks_by_pmids(top_pmids)
 
-        # HippoRAG entity-graph re-ranking
+        # HippoRAG entity-graph re-ranking — no try/except: if the user
+        # asked for hipporag/full and it errors, surface the error.
         if use_hipporag and self._hipporag is not None:
-            try:
-                from .hipporag import extract_query_entities
-                query_entities = extract_query_entities(query)
-                all_chunk_ids = [c["chunk_id"] for cs in chunks_by_pmid.values() for c in cs]
-                hipporag_boosts = self._hipporag.rerank_chunks(all_chunk_ids, query_entities)
-                # Aggregate the per-chunk boosts back to per-PMID
-                pmid_boost: dict[str, float] = {}
-                for pmid, cs in chunks_by_pmid.items():
-                    pmid_boost[pmid] = max(
-                        (hipporag_boosts.get(c["chunk_id"], 0.0) for c in cs),
-                        default=0.0,
-                    )
-                # Combine with RRF score and re-sort
-                combined = sorted(
-                    top_pmids,
-                    key=lambda p: score_map.get(p, 0.0) + hipporag_weight * pmid_boost.get(p, 0.0),
-                    reverse=True,
+            from .hipporag import extract_query_entities
+            query_entities = extract_query_entities(query)
+            all_chunk_ids = [c["chunk_id"] for cs in chunks_by_pmid.values() for c in cs]
+            hipporag_boosts = self._hipporag.rerank_chunks(all_chunk_ids, query_entities)
+            pmid_boost: dict[str, float] = {}
+            for pmid, cs in chunks_by_pmid.items():
+                pmid_boost[pmid] = max(
+                    (hipporag_boosts.get(c["chunk_id"], 0.0) for c in cs),
+                    default=0.0,
                 )
-                top_pmids = combined[:top_k]
-            except Exception as exc:
-                logger.warning("HippoRAG re-rank failed (%s); using base ranking.", exc)
-                top_pmids = top_pmids[:top_k]
+            combined = sorted(
+                top_pmids,
+                key=lambda p: score_map.get(p, 0.0) + hipporag_weight * pmid_boost.get(p, 0.0),
+                reverse=True,
+            )
+            top_pmids = combined[:top_k]
         else:
             top_pmids = top_pmids[:top_k]
 

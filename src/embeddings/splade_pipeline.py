@@ -80,15 +80,13 @@ class _SpladeEncoder:
 
 
 def ensure_splade_field(es: Elasticsearch, index: str = "papers") -> None:
-    """Add a sparse_vector field to the existing index mapping (idempotent)."""
-    try:
-        es.indices.put_mapping(
-            index=index,
-            properties={SPLADE_INDEX_FIELD: {"type": "sparse_vector"}},
-        )
-        logger.info("Mapping for %s.%s ensured.", index, SPLADE_INDEX_FIELD)
-    except Exception as exc:
-        logger.warning("Could not add SPLADE field mapping (%s).", exc)
+    """Add a sparse_vector field to the existing index mapping. Raises on failure
+    (e.g. ES < 8.11 doesn't support sparse_vector field type)."""
+    es.indices.put_mapping(
+        index=index,
+        properties={SPLADE_INDEX_FIELD: {"type": "sparse_vector"}},
+    )
+    logger.info("Mapping for %s.%s ensured.", index, SPLADE_INDEX_FIELD)
 
 
 def encode_and_index_chunks(

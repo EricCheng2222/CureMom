@@ -117,11 +117,7 @@ class _NERRunner:
     def extract(self, text: str, paper_id: int, chunk_id: int) -> list[ExtractedEntity]:
         if not text:
             return []
-        try:
-            spans = self._pipe(text)
-        except Exception as exc:
-            logger.warning("NER pipeline failed on chunk %d (%s); skipping.", chunk_id, exc)
-            return []
+        spans = self._pipe(text)
 
         results: list[ExtractedEntity] = []
         seen: set[tuple[str, str, int]] = set()

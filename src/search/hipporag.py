@@ -385,40 +385,26 @@ class HippoRAGRetriever:
         }
 
 
-# Cache: None = not tried yet; False = unavailable; nlp object = loaded.
-# Avoids re-importing on every query and silences the per-call warning.
-_query_nlp: object | None | bool = None
+# Singleton — same HF biomedical NER model as the chunk pipeline.
+# Cached after first call so we don't reload the 110 MB model per query.
+_query_ner_runner = None
 
 
 def extract_query_entities(query: str) -> list[str]:
-    """Extract entities from a query for HippoRAG seeding.
+    """Extract entities from a query for HippoRAG PPR seeding.
 
-    Tries scispaCy once on first call; caches the result. Falls back to a
-    cheap keyword extractor (silent after the first attempt) when scispaCy
-    isn't installed — which is the normal case on Python 3.9, since scispaCy
-    pins Python 3.10+.
+    Uses the same HuggingFace biomedical NER model as the chunk pipeline
+    (`d4data/biomedical-ner-all`). The model is loaded once on first call;
+    subsequent calls reuse it.
+
+    Raises RuntimeError if the model can't be loaded — callers (or the API
+    layer above) should surface that error rather than silently degrade.
     """
-    global _query_nlp
-    if _query_nlp is None:
-        try:
-            import spacy
-            _query_nlp = spacy.load("en_ner_bc5cdr_md")
-            logger.info("scispaCy loaded for query-time NER.")
-        except Exception:
-            _query_nlp = False
-            logger.info("scispaCy not available — using keyword fallback for query NER.")
+    global _query_ner_runner
+    if _query_ner_runner is None:
+        from ..embeddings.ner_pipeline import _NERRunner
+        logger.info("Loading HF NER model for query-time entity extraction…")
+        _query_ner_runner = _NERRunner()
 
-    if _query_nlp is False:
-        return _fallback_keywords(query)
-
-    doc = _query_nlp(query)
-    return [ent.text.lower() for ent in doc.ents]
-
-
-def _fallback_keywords(query: str) -> list[str]:
-    """Cheap fallback when scispaCy isn't present — returns content words."""
-    import re
-    stop = {"the", "is", "are", "and", "or", "of", "in", "on", "for", "to",
-            "a", "an", "what", "how", "why", "does", "do", "with", "by"}
-    return [w for w in re.findall(r"\b[a-zA-Z][a-zA-Z\-]{3,}\b", query.lower())
-            if w not in stop]
+    extracted = _query_ner_runner.extract(query, paper_id=0, chunk_id=0)
+    return [e.entity_text.lower() for e in extracted]

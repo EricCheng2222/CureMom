@@ -144,39 +144,63 @@ async def query(
     query_embedding: list[float] | None = None
 
     if dense_weight > 0:
-        try:
-            global _embedder
-            if _embedder is None:
-                from ..embeddings.chunk_pipeline import _Embedder
-                logger.info("Loading PubMedBERT for hybrid retrieval (one-time)…")
+        global _embedder
+        if _embedder is None:
+            from ..embeddings.chunk_pipeline import _Embedder
+            logger.info("Loading PubMedBERT for hybrid retrieval (one-time)…")
+            try:
                 _embedder = _Embedder()
-            query_embedding = _embedder.encode([req.query])[0]
-        except Exception as exc:
-            logger.warning(
-                "Embedding model unavailable (%s); falling back to BM25-only.", exc,
-            )
-            dense_weight = 0.0
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=502,
+                    detail=(
+                        f"Strategy '{strategy}' requires PubMedBERT embeddings, "
+                        f"but the model failed to load: {type(exc).__name__}: {exc}. "
+                        "Use retrieval_strategy='bm25' or 'hipporag', or install "
+                        "the embedding model: `pip install transformers torch`."
+                    ),
+                )
+        query_embedding = _embedder.encode([req.query])[0]
 
     if use_hipporag:
-        try:
-            global _hipporag
-            if _hipporag is None:
-                from ..search.hipporag import HippoRAGRetriever
-                logger.info("Loading HippoRAG entity graph (one-time)…")
+        global _hipporag
+        if _hipporag is None:
+            from ..search.hipporag import HippoRAGRetriever
+            logger.info("Loading HippoRAG entity graph (one-time)…")
+            try:
                 _hipporag = HippoRAGRetriever(DB_DSN)
-            retriever._hipporag = _hipporag
-        except Exception as exc:
-            logger.warning("HippoRAG unavailable (%s); skipping graph re-rank.", exc)
-            use_hipporag = False
+                _hipporag._ensure_loaded()
+                if _hipporag._graph is None or _hipporag._graph.number_of_edges() == 0:
+                    raise RuntimeError(
+                        "entity_graph table is empty — run "
+                        "`python scripts/build_entity_graph.py` first."
+                    )
+            except Exception as exc:
+                _hipporag = None  # don't cache the failure
+                raise HTTPException(
+                    status_code=502,
+                    detail=(
+                        f"Strategy '{strategy}' requires the HippoRAG entity graph, "
+                        f"which failed to load: {type(exc).__name__}: {exc}"
+                    ),
+                )
+        retriever._hipporag = _hipporag
 
-    chunks = retriever.retrieve(
-        query=req.query,
-        filters=filter_dict,
-        top_k=req.options.top_k,
-        dense_weight=dense_weight,
-        query_embedding=query_embedding,
-        use_hipporag=use_hipporag,
-    )
+    try:
+        chunks = retriever.retrieve(
+            query=req.query,
+            filters=filter_dict,
+            top_k=req.options.top_k,
+            dense_weight=dense_weight,
+            query_embedding=query_embedding,
+            use_hipporag=use_hipporag,
+        )
+    except Exception as exc:
+        logger.exception("Retrieval failed")
+        raise HTTPException(
+            status_code=502,
+            detail=f"Retrieval failed: {type(exc).__name__}: {exc}",
+        )
 
     if not chunks:
         return {
