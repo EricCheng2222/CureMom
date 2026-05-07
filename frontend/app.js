@@ -124,31 +124,40 @@ function appendAIBubble(text, citations) {
   d.className = 'msg msg-ai';
 
   // Pull off the follow-up section before linkifying. Accepts loose formatting:
-  //   "**You might also want to know:**"
-  //   "You might also want to know:"
-  //   "## Follow-up questions"
-  //   "**Suggested questions:**"
-  //   "**Related questions:**"
+  //   "**You might also want to know:**"  (markdown bold)
+  //   "## Follow-up questions"             (heading)
+  //   "Suggested questions:" / "Related questions:"
+  //   marker followed by either newlines+bullets OR all inline on one line
   let mainText = text;
   let followups = [];
-  const followupRe = new RegExp(
-    String.raw`(?:^|\n)\s*(?:\*+\s*|#+\s*)?` +
+  const markerRe = new RegExp(
+    String.raw`(?:^|\n|\.|\!|\?)\s*(?:\*+|#+)?\s*` +
     String.raw`(?:you\s+might\s+also\s+want\s+to\s+know|` +
     String.raw`follow[-\s]?up\s+questions|` +
     String.raw`suggested\s+questions|` +
     String.raw`related\s+questions|` +
-    String.raw`questions?\s+you\s+might\s+ask)` +
-    String.raw`\s*:?\s*\*?\*?\s*\n([\s\S]*?)$`,
+    String.raw`questions?\s+you\s+might\s+(?:ask|consider|wonder))` +
+    String.raw`\s*:?\s*\*+?\s*`,
     'i'
   );
-  const followupMatch = text.match(followupRe);
-  if (followupMatch) {
-    mainText = text.slice(0, followupMatch.index).trimEnd();
-    followups = followupMatch[1]
-      .split('\n')
+  const m = markerRe.exec(text);
+  if (m) {
+    // mainText = everything before the marker (re-include the punctuation we
+    // matched as a leading boundary, e.g. the "." after "decisions").
+    const boundary = m[0][0];
+    mainText = (text.slice(0, m.index) + (boundary.match(/[.!?]/) ? boundary : '')).trimEnd();
+    let tail = text.slice(m.index + m[0].length).trim();
+
+    // Try newline-separated bullets first
+    let items = tail.split(/\n+/).map(l => l.trim()).filter(Boolean);
+    // Fall back to inline " - " / " • " separators if everything's on one line
+    if (items.length === 1 && /\s[-•*]\s/.test(items[0])) {
+      items = items[0].split(/\s+[-•*]\s+/).filter(Boolean);
+    }
+
+    followups = items
       .map(l => l.replace(/^\s*[-•→*\d.]+\s*/, '').replace(/\*+/g, '').trim())
-      // keep only lines that look like questions or short prompts
-      .filter(l => l.length > 5 && l.length < 200);
+      .filter(l => l.length > 5 && l.length < 250);
   }
 
   const linked = mainText.replace(/\[(\d+)\]/g, (_, n) => {
