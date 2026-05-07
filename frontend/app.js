@@ -132,7 +132,21 @@ function appendAIBubble(text, citations) {
   const d = document.createElement('div');
   d.className = 'msg msg-ai';
 
-  const linked = text.replace(/\[(\d+)\]/g, (_, n) => {
+  // Pull off the "You might also want to know:" section before linkifying.
+  let mainText = text;
+  let followups = [];
+  const followupMatch = text.match(
+    /\*\*\s*you\s+might\s+also\s+want\s+to\s+know\s*:?\s*\*\*\s*\n([\s\S]*?)$/i
+  );
+  if (followupMatch) {
+    mainText = text.slice(0, followupMatch.index).trimEnd();
+    followups = followupMatch[1]
+      .split('\n')
+      .map(l => l.replace(/^\s*[-•→*\d.]\s*/, '').trim())
+      .filter(l => l.length > 5);
+  }
+
+  const linked = mainText.replace(/\[(\d+)\]/g, (_, n) => {
     const c = citations[parseInt(n, 10) - 1];
     return c
       ? `<button class="citation-ref" onclick="openModal(${JSON.stringify(c).replace(/"/g, '&quot;')})">[${n}]</button>`
@@ -156,13 +170,33 @@ function appendAIBubble(text, citations) {
       <div class="citations-block" hidden>${pills}</div>`;
   }
 
+  let followupHtml = '';
+  if (followups.length) {
+    followupHtml = `
+      <div class="followups">
+        <div class="followups-label">You might also want to know:</div>
+        ${followups.map(q => {
+          const safe = escapeHtml(q);
+          return `<button class="followup-chip" onclick="askFollowup(${JSON.stringify(q).replace(/"/g, '&quot;')})">${safe}</button>`;
+        }).join('')}
+      </div>`;
+  }
+
   d.innerHTML = `
     <div class="msg-avatar">
       <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 2C5.24 2 3 4.24 3 7C3 9.76 5.24 12 8 12C10.76 12 13 9.76 13 7" stroke="white" stroke-width="1.5" stroke-linecap="round"/><path d="M7 5H9M8 3V9" stroke="white" stroke-width="1.5" stroke-linecap="round"/></svg>
     </div>
-    <div class="msg-content"><div>${linked}</div>${citeHtml}</div>`;
+    <div class="msg-content"><div>${linked}</div>${citeHtml}${followupHtml}</div>`;
   msgs.appendChild(d);
   scrollChat();
+}
+
+// Click handler for follow-up suggestion chips
+function askFollowup(question) {
+  const ta = document.getElementById('consumer-input');
+  ta.value = question;
+  autoResize(ta);
+  sendConsumerMessage();
 }
 
 function scrollChat() {

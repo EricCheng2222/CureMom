@@ -26,6 +26,35 @@ from ..search.hybrid_retriever import RetrievedChunk
 
 logger = logging.getLogger(__name__)
 
+PATIENT_SYSTEM_PROMPT = """You are a patient-friendly medical assistant. You help non-medical readers understand what peer-reviewed research says about their condition, symptoms, or curiosity.
+
+RULES:
+1. Answer using ONLY the provided context passages — every factual claim must be supported by the passages.
+2. Cite every claim with [N] where N is the passage number (1-indexed).
+3. Use plain language. Avoid jargon. When a technical term is unavoidable, briefly explain it in parentheses (e.g. "anti-dsDNA antibody (a marker the immune system makes against the body's own DNA)").
+4. If the passages do not contain enough information, say exactly: "The research I have access to doesn't have enough information to answer that confidently."
+5. Be warm and direct. Short paragraphs. No medical-textbook tone.
+6. Do NOT use knowledge beyond the provided passages.
+
+Structure your answer:
+  • Start with a 1-2 sentence direct answer to what they asked.
+  • A short plain-language explanation with citations.
+  • If the question implies clinical advice (treatment, dose, "should I take..."), end the main answer with: "This is for information only — please talk to a qualified healthcare professional before making any decisions."
+
+Then, on a new section, ALWAYS include a follow-up section in this exact format:
+
+**You might also want to know:**
+- <one natural follow-up question the reader would likely ask next>
+- <another follow-up question, focused on a related angle>
+- <a third follow-up question, e.g. about treatments / mechanism / lifestyle / related conditions>
+
+The follow-up questions should:
+  • Be drawn from topics that the retrieved passages actually cover (don't suggest a follow-up if the literature can't answer it).
+  • Be phrased the way a curious reader would phrase them, not the way a doctor would.
+  • Be 3 questions, no more, no fewer.
+"""
+
+
 GROUNDING_SYSTEM_PROMPT = """You are a biomedical research assistant with access to retrieved passages from peer-reviewed medical literature.
 
 RULES:
@@ -72,9 +101,15 @@ def _parse_citation_indices(text: str) -> list[int]:
     return list({int(m) for m in re.findall(r"\[(\d+)\]", text)})
 
 
+def _select_system_prompt(plain_language: bool) -> str:
+    return PATIENT_SYSTEM_PROMPT if plain_language else GROUNDING_SYSTEM_PROMPT
+
+
 class LLMProvider(ABC):
     @abstractmethod
-    def synthesize(self, query: str, chunks: list[RetrievedChunk]) -> SynthesisResult:
+    def synthesize(
+        self, query: str, chunks: list[RetrievedChunk], plain_language: bool = False,
+    ) -> SynthesisResult:
         ...
 
     @property
@@ -90,7 +125,9 @@ class ExtractiveProvider(LLMProvider):
     def name(self) -> str:
         return "extractive"
 
-    def synthesize(self, query: str, chunks: list[RetrievedChunk]) -> SynthesisResult:
+    def synthesize(
+        self, query: str, chunks: list[RetrievedChunk], plain_language: bool = False,
+    ) -> SynthesisResult:
         if not chunks:
             return SynthesisResult(
                 response_text="No relevant passages were found for this query.",
@@ -138,14 +175,16 @@ class OllamaProvider(LLMProvider):
     def name(self) -> str:
         return f"ollama/{self._model}"
 
-    def synthesize(self, query: str, chunks: list[RetrievedChunk]) -> SynthesisResult:
+    def synthesize(
+        self, query: str, chunks: list[RetrievedChunk], plain_language: bool = False,
+    ) -> SynthesisResult:
         context = _build_context_block(chunks)
         user_message = f"Context passages:\n\n{context}\n\nQuestion: {query}"
 
         payload = {
             "model": self._model,
             "messages": [
-                {"role": "system", "content": GROUNDING_SYSTEM_PROMPT},
+                {"role": "system", "content": _select_system_prompt(plain_language)},
                 {"role": "user", "content": user_message},
             ],
             "stream": False,
@@ -201,7 +240,9 @@ class ClaudeProvider(LLMProvider):
     def name(self) -> str:
         return f"claude/{self._model}"
 
-    def synthesize(self, query: str, chunks: list[RetrievedChunk]) -> SynthesisResult:
+    def synthesize(
+        self, query: str, chunks: list[RetrievedChunk], plain_language: bool = False,
+    ) -> SynthesisResult:
         try:
             import anthropic
         except ImportError as exc:
@@ -214,7 +255,7 @@ class ClaudeProvider(LLMProvider):
         message = client.messages.create(
             model=self._model,
             max_tokens=self._max_tokens,
-            system=GROUNDING_SYSTEM_PROMPT,
+            system=_select_system_prompt(plain_language),
             messages=[{"role": "user", "content": user_message}],
         )
 
@@ -248,7 +289,9 @@ class OpenAIProvider(LLMProvider):
     def name(self) -> str:
         return f"openai/{self._model}"
 
-    def synthesize(self, query: str, chunks: list[RetrievedChunk]) -> SynthesisResult:
+    def synthesize(
+        self, query: str, chunks: list[RetrievedChunk], plain_language: bool = False,
+    ) -> SynthesisResult:
         try:
             import openai
         except ImportError as exc:
@@ -262,7 +305,7 @@ class OpenAIProvider(LLMProvider):
             model=self._model,
             max_tokens=self._max_tokens,
             messages=[
-                {"role": "system", "content": GROUNDING_SYSTEM_PROMPT},
+                {"role": "system", "content": _select_system_prompt(plain_language)},
                 {"role": "user", "content": user_message},
             ],
         )

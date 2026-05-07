@@ -522,6 +522,47 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); }
 }
 .citation-ref:hover { background: rgba(129,140,248,.25); }
 
+/* Follow-up suggestion chips after a patient-mode answer */
+.followups {
+  margin-top: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.followups-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .4px;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 2px;
+}
+.followup-chip {
+  text-align: left;
+  font-size: 13px;
+  font-family: var(--font);
+  color: var(--indigo);
+  background: var(--indigo-soft);
+  border: 1px solid rgba(129,140,248,.25);
+  border-radius: 10px;
+  padding: 8px 12px;
+  cursor: pointer;
+  line-height: 1.45;
+  transition: background .15s, border-color .15s, transform .1s;
+}
+.followup-chip:hover {
+  background: rgba(129,140,248,.22);
+  border-color: rgba(129,140,248,.45);
+}
+.followup-chip:active { transform: scale(.98); }
+.followup-chip::before {
+  content: '→';
+  display: inline-block;
+  margin-right: 6px;
+  color: var(--indigo);
+  opacity: .6;
+}
+
 /* Chat input */
 .chat-input-bar {
   background: var(--bg-2);

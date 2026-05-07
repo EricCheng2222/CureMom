@@ -118,6 +118,7 @@ class QueryOptions(BaseModel):
     retrieval_strategy: str = Field(default="full", pattern="^(bm25|hybrid|hipporag|full)$")
     include_full_passages: bool = True
     llm_provider: str | None = None   # override LLM_PROVIDER env var
+    plain_language: bool = False      # patient-mode tone + follow-up questions
 
 
 class QueryRequest(BaseModel):
@@ -212,7 +213,9 @@ async def query(
 
     try:
         provider = get_provider(req.options.llm_provider)
-        synthesis = provider.synthesize(req.query, chunks)
+        synthesis = provider.synthesize(
+            req.query, chunks, plain_language=req.options.plain_language,
+        )
     except Exception as exc:
         logger.exception("LLM provider %r failed", req.options.llm_provider)
         raise HTTPException(
