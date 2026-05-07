@@ -25,11 +25,13 @@ PubMed API                   ChEMBL API (no key required)
   FastAPI → structured JSON response + passage-level citations
 ```
 
-**Phases:**
-- **Phase 1 (complete):** BM25 + extractive responses, no LLM required
-- **Phase 2:** PubMedBERT embeddings + hybrid retrieval (RRF fusion)
-- **Phase 3:** Pluggable LLM synthesis (Ollama, Claude, OpenAI)
-- **Phase 4:** HippoRAG entity graph + SPLADE (no Neo4j needed)
+**Phases (current state):**
+- **Phase 1** ✅ live — BM25 retrieval, extractive responses, no LLM required
+- **Phase 2** ✅ code complete; embedding run optional — section-aware chunking + PubMedBERT (768-dim, mean-pooled, MPS/CUDA/CPU auto), HuggingFace transformer NER (`d4data/biomedical-ner-all`)
+- **Phase 3** ✅ live — pluggable LLM (extractive / Ollama / Claude / OpenAI), query-complexity classifier, citation verifier (catches hallucinated `[N]` indices and weakly-supported claims), `/llm/status` health endpoint
+- **Phase 4** ✅ live — HippoRAG Personalized PageRank over a 5.27M-edge entity graph (built from MeSH descriptors merged with NER co-occurrences), SPLADE sparse-vector pipeline ready to encode
+
+**Default retrieval strategy:** `full` = BM25 + dense (when embeddings present) + HippoRAG PPR rerank.
 
 ---
 
@@ -159,16 +161,32 @@ PYTHONPATH=. python scripts/extract_entities.py --paper-ids 1 2 3
 PYTHONPATH=. python scripts/extract_entities.py --model alvaroalon2/biobert_diseases_ner
 ```
 
-Expect ~600 ms/chunk on M-series MPS. For 33K chunks that's ~5–6 hours.
+Verified on M1 Max: ~125 ms/chunk on MPS. **71K chunks → 1.23M entities in ~33 min.**
 
 ### 10. (Phase 4 — optional) Build the entity graph for HippoRAG retrieval
 
-After NER populates `paper_entities`, build the co-occurrence graph that
-HippoRAG's Personalized PageRank traverses at query time.
+The HippoRAG retriever runs Personalized PageRank over an entity co-occurrence
+graph. There are three sources you can feed the graph:
 
 ```bash
-# One-time full build (5–10 min for 33K papers; scales linearly)
-PYTHONPATH=. python scripts/build_entity_graph.py
+# Default — fast, NER-free. Co-occurrence of MeSH descriptors on the same
+# paper. Verified on 33K papers: ~52 seconds → 557K edges.
+PYTHONPATH=. python scripts/build_entity_graph.py --source mesh
+
+# Higher resolution but requires step 9 (NER) first. Uses paper_entities.
+PYTHONPATH=. python scripts/build_entity_graph.py --source ner
+
+# Recommended once NER has run: MeSH first, then merge NER on top.
+# Verified: 33K papers + 71K chunks → 5.27M edges in ~3 min.
+PYTHONPATH=. python scripts/build_entity_graph.py --source both
+```
+
+After rebuilding, hot-reload the in-memory graph in the running server
+(no restart needed):
+
+```bash
+curl -X POST http://localhost:8000/api/v1/hipporag/reload
+# → {"status":"reloaded","nodes":46190,"edges":1081723}
 ```
 
 For a live system, prefer **incremental updates** as new papers are ingested
@@ -183,12 +201,26 @@ on top of BM25) or `"full"` (BM25 + dense + HippoRAG combined — the default).
 curl -X POST http://localhost:8000/api/v1/query \
   -H 'Content-Type: application/json' \
   -d '{"query":"What drugs target the complement pathway in lupus nephritis?",
-       "options":{"retrieval_strategy":"full","top_k":10,"llm_provider":"claude"}}'
+       "options":{"retrieval_strategy":"full","top_k":10,"llm_provider":"ollama"}}'
 ```
 
 Multi-hop questions like the example above benefit most from `hipporag`/`full`
 because PPR surfaces chunks that *bridge* the query entities ("complement",
 "drug", "lupus", "nephritis") even if no single chunk mentions all four.
+Verified live: returns 5 relevant papers in ~2.3s on the 1M-edge filtered graph.
+
+### 11. (Phase 4 — optional) SPLADE sparse vectors
+
+Learned sparse vectors that capture biomedical synonym expansion (e.g.
+"antimalarial" ↔ "hydroxychloroquine") natively in Elasticsearch. Requires
+ES 8.11+ (the `sparse_vector` field type).
+
+```bash
+PYTHONPATH=. python scripts/encode_splade.py
+```
+
+Each paper gets its chunks max-pooled into one sparse vector merged into the
+existing ES doc. ~2 hours for 33K papers on M-series MPS.
 
 ---
 
@@ -208,10 +240,19 @@ curl -X POST http://localhost:8000/api/v1/query \
     },
     "options": {
       "top_k": 10,
-      "retrieval_strategy": "bm25"
+      "retrieval_strategy": "full",
+      "llm_provider": "ollama"
     }
   }'
 ```
+
+`retrieval_strategy` is one of:
+- `bm25` — Elasticsearch keyword scoring only (~20 ms; baseline)
+- `hybrid` — BM25 + dense vector RRF fusion (degrades to BM25 if embeddings missing)
+- `hipporag` — BM25 + HippoRAG entity-graph PPR rerank (~2 s)
+- `full` — BM25 + dense + HippoRAG (default)
+
+`llm_provider` is one of `extractive` / `ollama` / `claude` / `openai`. Defaults to whatever `LLM_PROVIDER` is in `.env`.
 
 **Response structure:**
 ```json
@@ -262,6 +303,9 @@ curl "http://localhost:8000/api/v1/llm/status"
 
 # Classify a query (factual | exploratory | comparative)
 curl "http://localhost:8000/api/v1/query/classify?q=Is+HCQ+better+than+MTX"
+
+# Reload HippoRAG entity graph after rebuild (no server restart)
+curl -X POST "http://localhost:8000/api/v1/hipporag/reload"
 
 # Search papers
 curl "http://localhost:8000/api/v1/papers/search?q=lupus+nephritis+treatment&pub_year_from=2018"
@@ -329,20 +373,22 @@ src/
     hipporag.py              — Entity co-occurrence graph PPR retrieval (Phase 4)
   embeddings/
     chunk_pipeline.py     — Section-aware chunking + PubMedBERT inference (Phase 2)
-    ner_pipeline.py       — scispaCy NER + entity linking (Phase 2)
+    ner_pipeline.py       — HuggingFace transformer biomedical NER (Phase 2)
+    splade_pipeline.py    — SPLADE sparse-vector encoding for ES (Phase 4)
   api/
     main.py               — FastAPI app + all endpoints
     response_builder.py   — Structured response + passage-level citation provenance
     llm_providers.py      — Swappable LLM (Extractive / Ollama / Claude / OpenAI)
     classifier.py         — Query complexity classifier (Phase 3)
-    citation_verifier.py  — Citation [N] parser + NLI entailment check (Phase 3)
+    citation_verifier.py  — Citation [N] parser + lexical-overlap check (Phase 3)
 scripts/
   ingest.py               — CLI: run the ingestion pipeline
   fetch_chembl.py         — CLI: ChEMBL compound-target data + PubMed queuing
+  sync_elasticsearch.py   — CLI: backfill PostgreSQL papers → Elasticsearch
   embed.py                — CLI: embed chunks with PubMedBERT (Phase 2)
-  extract_entities.py     — CLI: scispaCy NER on chunks (Phase 2)
-  sync_es.py              — CLI: sync PostgreSQL → Elasticsearch index
-  build_entity_graph.py   — CLI: build entity co-occurrence graph (Phase 4)
+  extract_entities.py     — CLI: HF transformer NER on chunks (Phase 2)
+  build_entity_graph.py   — CLI: MeSH/NER entity graph builder (Phase 4)
+  encode_splade.py        — CLI: SPLADE sparse vectors → ES (Phase 4)
 docker-compose.yml        — postgres+pgvector, elasticsearch, app
 Dockerfile
 requirements.txt
@@ -414,10 +460,20 @@ This surfaces compounds we've never heard of that happen to strongly inhibit a t
 
 See [`TODO.md`](TODO.md) for the full task list.
 
-- **Phase 2:** PubMedBERT embeddings, scispaCy NER, hybrid BM25+dense retrieval (RRF)
-- **Phase 3:** LLM synthesis fully wired, `[N]` citation parser, query complexity classifier
-- **Phase 4:** HippoRAG entity graph (PostgreSQL PPR, no Neo4j), SPLADE sparse vectors in Elasticsearch
-- **Expand:** Additional autoimmune topics (RA, myositis, systemic sclerosis), sarcopenia, exercise transcriptomics
+**Done:**
+- ✅ **Phase 1:** BM25 retrieval + extractive responses + citation provenance
+- ✅ **Phase 2 (code):** PubMedBERT embedder + section-aware chunking; HF transformer NER (`d4data/biomedical-ner-all`); RRF hybrid path wired
+- ✅ **Phase 3:** Pluggable LLM (extractive / Ollama / Claude / OpenAI); `[N]` citation parser; query classifier; citation verifier; `/llm/status` health endpoint
+- ✅ **Phase 4:** HippoRAG entity graph (5.27M edges from MeSH + NER co-occurrence) with NetworkX Personalized PageRank rerank — no Neo4j; SPLADE sparse-vector pipeline ready
+
+**Pending offline runs (heavy compute):**
+- Run `scripts/embed.py` — generate 768-dim PubMedBERT vectors over chunks (~1 hr); enables real `hybrid` and `full` strategies (currently degrade to BM25 + HippoRAG)
+- Run `scripts/encode_splade.py` — populate Elasticsearch `sparse_vector` field (~2 hr)
+
+**Next:**
+- Streaming responses for Claude / OpenAI (Server-Sent Events)
+- Cross-encoder re-rank on top-20 (e.g. `ms-marco-MiniLM-L-12-v2`)
+- Expand corpus: RA, myositis, systemic sclerosis, sarcopenia, exercise transcriptomics
 
 ---
 
