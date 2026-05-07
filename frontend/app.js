@@ -132,18 +132,32 @@ function appendAIBubble(text, citations) {
   const d = document.createElement('div');
   d.className = 'msg msg-ai';
 
-  // Pull off the "You might also want to know:" section before linkifying.
+  // Pull off the follow-up section before linkifying. Accepts loose formatting:
+  //   "**You might also want to know:**"
+  //   "You might also want to know:"
+  //   "## Follow-up questions"
+  //   "**Suggested questions:**"
+  //   "**Related questions:**"
   let mainText = text;
   let followups = [];
-  const followupMatch = text.match(
-    /\*\*\s*you\s+might\s+also\s+want\s+to\s+know\s*:?\s*\*\*\s*\n([\s\S]*?)$/i
+  const followupRe = new RegExp(
+    String.raw`(?:^|\n)\s*(?:\*+\s*|#+\s*)?` +
+    String.raw`(?:you\s+might\s+also\s+want\s+to\s+know|` +
+    String.raw`follow[-\s]?up\s+questions|` +
+    String.raw`suggested\s+questions|` +
+    String.raw`related\s+questions|` +
+    String.raw`questions?\s+you\s+might\s+ask)` +
+    String.raw`\s*:?\s*\*?\*?\s*\n([\s\S]*?)$`,
+    'i'
   );
+  const followupMatch = text.match(followupRe);
   if (followupMatch) {
     mainText = text.slice(0, followupMatch.index).trimEnd();
     followups = followupMatch[1]
       .split('\n')
-      .map(l => l.replace(/^\s*[-•→*\d.]\s*/, '').trim())
-      .filter(l => l.length > 5);
+      .map(l => l.replace(/^\s*[-•→*\d.]+\s*/, '').replace(/\*+/g, '').trim())
+      // keep only lines that look like questions or short prompts
+      .filter(l => l.length > 5 && l.length < 200);
   }
 
   const linked = mainText.replace(/\[(\d+)\]/g, (_, n) => {

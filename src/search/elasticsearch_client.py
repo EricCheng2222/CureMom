@@ -101,6 +101,42 @@ def bulk_index_papers(
     return success, error_count
 
 
+_QUERY_FILLER_RE = __import__("re").compile(
+    r"^\s*(?:"
+    r"please\s+)?"
+    r"(?:"
+    r"can\s+you\s+(?:tell\s+me|explain|describe)|"
+    r"could\s+you\s+(?:tell\s+me|explain|describe)|"
+    r"tell\s+me\s+about|"
+    r"explain(?:\s+to\s+me)?|"
+    r"describe|"
+    r"what\s+(?:is|are|does|do|helps?|happens?|causes?)|"
+    r"how\s+(?:does|do|is|are|can|to)|"
+    r"why\s+(?:does|do|is|are)|"
+    r"where\s+(?:does|do|is|are|can)|"
+    r"when\s+(?:does|do|is|are)|"
+    r"i\s+(?:want|need|would\s+like)\s+to\s+(?:know|understand|learn)|"
+    r"i\s+(?:wonder|am\s+wondering)"
+    r")\s+",
+    __import__("re").IGNORECASE,
+)
+
+
+def _strip_query_filler(query: str) -> str:
+    """Strip natural-language preamble so BM25 sees content terms only.
+
+    'tell me about muscle growth' -> 'muscle growth'
+    'how do muscles grow'         -> 'muscles grow'
+    'what is lupus'               -> 'lupus'
+
+    Falls back to the original query if stripping leaves it too short.
+    """
+    cleaned = _QUERY_FILLER_RE.sub("", query).strip(" ?.!,")
+    if len(cleaned.split()) < 1:
+        return query
+    return cleaned
+
+
 def search_bm25(
     es: Elasticsearch,
     query: str,
@@ -108,18 +144,31 @@ def search_bm25(
     top_k: int = 20,
     index: str = INDEX_NAME,
 ) -> list[dict[str, Any]]:
-    """BM25 search across title, abstract, full_text, mesh_terms.
+    """BM25 search across abstract, mesh_terms, full_text, title.
 
     filters: optional dict with keys like pub_year_from, pub_year_to,
              publication_types (list), mesh_terms (list), language.
     Returns list of {pmid, score, highlight} dicts.
     """
+    cleaned_query = _strip_query_filler(query)
+
     must_clauses: list[dict] = [
         {
             "multi_match": {
-                "query": query,
-                "fields": ["title^3", "abstract^1.5", "mesh_terms^2", "full_text"],
-                "type": "best_fields",
+                "query": cleaned_query,
+                # Field weighting: content fields dominate; title kept low so
+                # papers with interrogative titles ("How do X work?") don't
+                # match natural-language queries by tone alone.
+                #   abstract     2.0 — primary content
+                #   mesh_terms   2.0 — curated, normalized concept tags
+                #   full_text    1.5 — secondary content
+                #   title        0.5 — tiebreaker only
+                "fields": ["abstract^2", "mesh_terms^2", "full_text^1.5", "title^0.5"],
+                # cross_fields lets multi-word queries match across fields
+                # (e.g. "muscle" in title + "growth" in abstract counts).
+                "type": "cross_fields",
+                # Require most query terms to match; one missing is OK.
+                "minimum_should_match": "75%",
             }
         }
     ]
