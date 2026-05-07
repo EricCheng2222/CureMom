@@ -330,27 +330,39 @@ class OpenAIProvider(LLMProvider):
         )
 
 
-def get_provider(provider_name: str | None = None) -> LLMProvider:
-    """Factory: return the appropriate LLMProvider from env or explicit name."""
-    name = (provider_name or os.environ.get("LLM_PROVIDER", "extractive")).lower()
+def get_provider(provider_spec: str | None = None) -> LLMProvider:
+    """Factory: return the appropriate LLMProvider.
 
-    if name == "extractive":
+    `provider_spec` is either a bare provider name ("extractive", "ollama",
+    "claude", "openai") or a provider/model override ("ollama/medgemma:4b",
+    "claude/claude-haiku-4-5"). When no model is specified, the
+    corresponding env var is used (OLLAMA_MODEL / CLAUDE_MODEL / OPENAI_MODEL).
+    """
+    spec = provider_spec or os.environ.get("LLM_PROVIDER", "extractive")
+    head, _, model_override = spec.partition("/")
+    head = head.strip().lower()
+    model_override = model_override.strip() or None
+
+    if head == "extractive":
         return ExtractiveProvider()
 
-    if name == "ollama":
+    if head == "ollama":
         return OllamaProvider(
             base_url=os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434"),
-            model=os.environ.get("OLLAMA_MODEL", "biomistral"),
+            model=model_override or os.environ.get("OLLAMA_MODEL", "biomistral"),
         )
 
-    if name == "claude":
+    if head == "claude":
         return ClaudeProvider(
-            model=os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6"),
+            model=model_override or os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6"),
         )
 
-    if name == "openai":
+    if head == "openai":
         return OpenAIProvider(
-            model=os.environ.get("OPENAI_MODEL", "gpt-4o"),
+            model=model_override or os.environ.get("OPENAI_MODEL", "gpt-4o"),
         )
 
-    raise ValueError(f"Unknown LLM provider: {name!r}. Choose: extractive, ollama, claude, openai")
+    raise ValueError(
+        f"Unknown LLM provider: {head!r}. Choose: extractive, ollama[/<model>], "
+        "claude[/<model>], openai[/<model>]"
+    )

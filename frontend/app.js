@@ -32,6 +32,71 @@ async function checkStatus() {
 }
 checkStatus();
 
+// ── Populate provider dropdowns dynamically from /api/v1/llm/status ─────────
+async function populateProviderDropdowns() {
+  let status;
+  try {
+    const r = await fetch(`${API}/api/v1/llm/status`, { signal: AbortSignal.timeout(5000) });
+    if (!r.ok) return;
+    status = await r.json();
+  } catch { return; }
+
+  const ollama = status.providers?.ollama || {};
+  const installed = ollama.installed_models || [];
+  const defaultOllama = ollama.model;
+
+  const claude = status.providers?.claude || {};
+  const openai = status.providers?.openai || {};
+
+  for (const id of ['consumer-provider', 'pro-provider']) {
+    const sel = document.getElementById(id);
+    if (!sel) continue;
+    // Strip everything except the static "Extractive" option
+    [...sel.options].forEach(o => { if (o.value !== 'extractive') o.remove(); });
+
+    if (installed.length) {
+      const optgroup = document.createElement('optgroup');
+      optgroup.label = ollama.available ? 'Ollama (local)' : 'Ollama (offline?)';
+      installed.forEach(m => {
+        const opt = document.createElement('option');
+        opt.value = `ollama/${m}`;
+        opt.textContent = m;
+        if (m === defaultOllama || m === `${defaultOllama}:latest`) {
+          opt.textContent += '  (default)';
+          opt.dataset.isDefault = '1';
+        }
+        optgroup.appendChild(opt);
+      });
+      sel.appendChild(optgroup);
+    } else if (ollama.endpoint) {
+      const opt = document.createElement('option');
+      opt.value = 'ollama'; opt.disabled = true;
+      opt.textContent = `Ollama — no models installed`;
+      sel.appendChild(opt);
+    }
+
+    if (claude.available) {
+      const opt = document.createElement('option');
+      opt.value = 'claude';
+      opt.textContent = `Claude (${claude.model})`;
+      sel.appendChild(opt);
+    }
+    if (openai.available) {
+      const opt = document.createElement('option');
+      opt.value = 'openai';
+      opt.textContent = `OpenAI (${openai.model})`;
+      sel.appendChild(opt);
+    }
+
+    // Auto-select the configured default Ollama model if there is one
+    if (status.configured_provider === 'ollama' && installed.length) {
+      const def = [...sel.options].find(o => o.dataset.isDefault === '1');
+      if (def) sel.value = def.value;
+    }
+  }
+}
+populateProviderDropdowns();
+
 // ── Consumer chat ────────────────────────────────────────────────────────────
 function fillExample(btn) {
   const ta = document.getElementById('consumer-input');
