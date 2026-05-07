@@ -125,14 +125,40 @@ uvicorn src.api.main:app --reload
 # UI:   http://localhost:8000/
 ```
 
-### 8. (Phase 2 — optional) Generate embeddings for hybrid retrieval
+### 8a. (Recommended) Pull PMC full text for OA papers
 
-After abstract chunks are populated by the ingestion pipeline, run PubMedBERT
-inference to add 768-dim embeddings to each chunk. Without this, the
-"Hybrid (BM25 + dense)" mode in the UI silently falls back to BM25-only.
+PubMed only exposes abstracts. For methods, results, discussion, etc., you
+need to download JATS XML from PMC for the Open Access subset of papers
+(roughly the ones with a `pmcid` set). Without this step, the LLM only
+sees the abstract of each retrieved paper.
 
 ```bash
-# Embed all chunks lacking embeddings (uses MPS/CUDA/CPU automatically)
+# Fetch full text for all eligible papers (PMCID set, has_full_text=false)
+PYTHONPATH=. python scripts/fetch_pmc.py
+
+# Smoke-test on a handful first:
+PYTHONPATH=. python scripts/fetch_pmc.py --limit 100
+```
+
+Rate: 3 req/s without an NCBI API key (~12 hr for ~38K eligible papers),
+10 req/s with one (~1.5 hr). Set `NCBI_API_KEY` in `.env` to use the faster path.
+
+Verified: 5 papers → 12 + 7 + 12 + 3 + 1 sections (intro / methods / results /
+discussion / conclusion / abstract / other), avg ~2,400 chars per section.
+
+### 8b. (Phase 2 — recommended) Generate embeddings for hybrid retrieval
+
+PubMedBERT inference adds 768-dim embeddings to each chunk in
+`paper_chunks`. Without this, `retrieval_strategy=hybrid` and `full` raise
+a 502 (no silent fallback).
+
+```bash
+# After step 8a, regenerate chunks for the new full-text sections
+# (intro/methods/discussion → 512-token sliding window with 128 overlap;
+#  results → one chunk per paragraph; abstract chunks already exist)
+PYTHONPATH=. python scripts/embed.py --chunk-fulltext
+
+# Embed all chunks lacking embeddings
 PYTHONPATH=. python scripts/embed.py --batch-size 32
 
 # After bulk load, build the HNSW index for fast vector search
@@ -140,7 +166,7 @@ PYTHONPATH=. python scripts/embed.py --index-only
 ```
 
 The first run downloads `microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract-fulltext`
-(~440 MB) and takes ~1 hour for 33K chunks on M-series Macs (faster on GPU).
+(~440 MB). Embedding cost: ~1 hour per 30K chunks on M-series MPS.
 
 ### 9. (Phase 2 — optional) Extract biomedical entities (for Phase 4 graph)
 
@@ -382,10 +408,11 @@ src/
     classifier.py         — Query complexity classifier (Phase 3)
     citation_verifier.py  — Citation [N] parser + lexical-overlap check (Phase 3)
 scripts/
-  ingest.py               — CLI: run the ingestion pipeline
+  ingest.py               — CLI: run the ingestion pipeline (PubMed metadata + abstracts)
   fetch_chembl.py         — CLI: ChEMBL compound-target data + PubMed queuing
+  fetch_pmc.py            — CLI: full-text JATS XML for OA papers → paper_sections
   sync_elasticsearch.py   — CLI: backfill PostgreSQL papers → Elasticsearch
-  embed.py                — CLI: embed chunks with PubMedBERT (Phase 2)
+  embed.py                — CLI: chunk full text + embed with PubMedBERT (Phase 2)
   extract_entities.py     — CLI: HF transformer NER on chunks (Phase 2)
   build_entity_graph.py   — CLI: MeSH/NER entity graph builder (Phase 4)
   encode_splade.py        — CLI: SPLADE sparse vectors → ES (Phase 4)
