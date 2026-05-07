@@ -255,23 +255,6 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); }
   display: flex; align-items: center; gap: 8px;
 }
 
-.chip-group { display: flex; flex-direction: column; gap: 3px; }
-.chip {
-  padding: 7px 10px;
-  border-radius: var(--radius-sm);
-  font-size: 13px; font-weight: 500;
-  text-align: left;
-  border: none;
-  background: transparent;
-  color: var(--text-2);
-  cursor: pointer;
-  font-family: var(--font);
-  transition: background .12s, color .12s;
-}
-.chip:hover { background: var(--surface); color: var(--text); }
-.active-chip { background: var(--indigo-soft); color: var(--indigo); }
-.active-chip:hover { background: var(--indigo-soft); color: var(--indigo); }
-
 .example-list { display: flex; flex-direction: column; gap: 2px; }
 .example-btn {
   padding: 7px 10px;

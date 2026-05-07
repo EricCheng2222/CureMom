@@ -33,15 +33,6 @@ async function checkStatus() {
 checkStatus();
 
 // ── Consumer chat ────────────────────────────────────────────────────────────
-let activeTopic = 'lupus';
-
-function setTopic(t) {
-  activeTopic = t;
-  document.querySelectorAll('.chip').forEach(c =>
-    c.classList.toggle('active-chip', c.getAttribute('onclick').includes(`'${t}'`))
-  );
-}
-
 function fillExample(btn) {
   const ta = document.getElementById('consumer-input');
   ta.value = btn.textContent.trim();
