@@ -86,7 +86,14 @@ class SynthesisResult:
 
 def _build_context_block(chunks: list[RetrievedChunk]) -> str:
     """Format retrieved chunks as numbered passages for the LLM context."""
-    lines: list[str] = []
+    n = len(chunks)
+    lines: list[str] = [
+        f"You have exactly {n} passage{'s' if n != 1 else ''}, "
+        f"numbered [1] through [{n}]. "
+        f"Do NOT cite any number outside this range — "
+        f"if you do, your answer will be rejected.",
+        "",
+    ]
     for i, chunk in enumerate(chunks, start=1):
         author_year = f"{chunk.authors_short}, {chunk.pub_year}" if chunk.pub_year else chunk.authors_short
         source_line = f"[{i}] Source: {author_year}. {chunk.journal or ''}. PMID:{chunk.pmid}"

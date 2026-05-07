@@ -167,8 +167,9 @@ def search_bm25(
                 # cross_fields lets multi-word queries match across fields
                 # (e.g. "muscle" in title + "growth" in abstract counts).
                 "type": "cross_fields",
-                # Require most query terms to match; one missing is OK.
-                "minimum_should_match": "75%",
+                # At least half the query terms must match — generous on
+                # natural-language phrasing while still requiring real overlap.
+                "minimum_should_match": "50%",
             }
         }
     ]
