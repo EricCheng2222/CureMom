@@ -9,9 +9,11 @@ from contextlib import asynccontextmanager
 from typing import Annotated, Any
 
 # Load .env BEFORE anything reads os.environ — providers, DSN, etc.
+# override=True so editing .env and triggering uvicorn --reload picks up
+# the new values (default override=False keeps stale env vars).
 try:
     from dotenv import load_dotenv
-    load_dotenv()
+    load_dotenv(override=True)
 except ImportError:
     pass
 
