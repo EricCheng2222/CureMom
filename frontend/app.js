@@ -34,17 +34,19 @@ checkStatus();
 
 // ── Populate provider dropdowns dynamically from /api/v1/llm/status ─────────
 async function populateProviderDropdowns() {
-  let status;
-  try {
-    const r = await fetch(`${API}/api/v1/llm/status`, { signal: AbortSignal.timeout(5000) });
-    if (!r.ok) return;
-    status = await r.json();
-  } catch { return; }
+  console.log('[providers] fetching /api/v1/llm/status…');
+  // No silent fallback — let errors surface so the user knows the dropdown
+  // is incomplete because of a real failure, not because we picked defaults.
+  const r = await fetch(`${API}/api/v1/llm/status`, { signal: AbortSignal.timeout(5000) });
+  if (!r.ok) {
+    throw new Error(`/api/v1/llm/status returned HTTP ${r.status}`);
+  }
+  const status = await r.json();
+  console.log('[providers] status:', status);
 
   const ollama = status.providers?.ollama || {};
   const installed = ollama.installed_models || [];
   const defaultOllama = ollama.model;
-
   const claude = status.providers?.claude || {};
   const openai = status.providers?.openai || {};
 
@@ -71,7 +73,7 @@ async function populateProviderDropdowns() {
     } else if (ollama.endpoint) {
       const opt = document.createElement('option');
       opt.value = 'ollama'; opt.disabled = true;
-      opt.textContent = `Ollama — no models installed`;
+      opt.textContent = 'Ollama — no models installed';
       sel.appendChild(opt);
     }
 
@@ -94,8 +96,11 @@ async function populateProviderDropdowns() {
       if (def) sel.value = def.value;
     }
   }
+  console.log('[providers] dropdown populated with', installed.length, 'Ollama models');
 }
-populateProviderDropdowns();
+populateProviderDropdowns().catch(err => {
+  console.error('[providers] populate failed:', err);
+});
 
 // ── Consumer chat ────────────────────────────────────────────────────────────
 function fillExample(btn) {
