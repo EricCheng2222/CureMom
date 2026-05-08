@@ -39,26 +39,36 @@ class QueryAnalysis:
 _ANALYZER_PROMPT = """You analyze medical queries before retrieval. Output ONLY a JSON object — no prose, no markdown fences. Fields:
 
   intent: one of
-    - "about_specific_drug"      — the user names a drug and wants info about it
-    - "find_drugs_by_effect"     — the user describes an effect/condition and wants drugs for it
-    - "general"                  — neither of the above (e.g. mechanism question, biology question)
-  drug_names:        array of drug names actually MENTIONED in the query (lowercase, generic preferred). Empty if none.
-  indication_terms:  array of canonical CLINICAL terms (max 6) for the effect or condition the user is asking about. Use the language an FDA drug label would use. Examples:
-    "muscle relaxation"     → ["skeletal muscle relaxant", "muscle spasm", "musculoskeletal pain", "spasticity"]
-    "lower cholesterol"     → ["hypercholesterolemia", "hyperlipidemia", "ldl reduction"]
-    "high blood pressure"   → ["hypertension", "essential hypertension", "blood pressure reduction"]
-    "lupus treatment"       → ["systemic lupus erythematosus", "lupus nephritis", "autoimmune"]
-    "muscle growth"         → []  (this is biology, not a drug indication)
-  Only put terms in `indication_terms` if the query is asking for drugs.
+    - "about_specific_drug"      — query names a specific drug, regardless of what aspect (uses, mechanism, dose, side effects, interactions, contraindications, pharmacology)
+    - "find_drugs_by_effect"     — query describes an effect/condition WITHOUT naming a drug, and is asking what drugs treat it
+    - "general"                  — neither: pure biology, anatomy, physiology, or no medication angle
+  drug_names:        array of drug names actually MENTIONED in the query (lowercase, generic preferred). REQUIRED whenever a drug name appears, even for mechanism/biology questions about that drug.
+  indication_terms:  array of canonical CLINICAL terms (max 6) for the effect or condition. Use FDA-label language. Only populate when intent="find_drugs_by_effect".
 
 Examples:
+
 Q: "What is hydroxychloroquine used for?"
 {"intent":"about_specific_drug","drug_names":["hydroxychloroquine"],"indication_terms":[]}
+
+Q: "What is the mechanism of cyclobenzaprine?"
+{"intent":"about_specific_drug","drug_names":["cyclobenzaprine"],"indication_terms":[]}
+
+Q: "How does atorvastatin lower cholesterol?"
+{"intent":"about_specific_drug","drug_names":["atorvastatin"],"indication_terms":[]}
+
+Q: "Side effects of metformin?"
+{"intent":"about_specific_drug","drug_names":["metformin"],"indication_terms":[]}
 
 Q: "what drugs help muscle relaxation"
 {"intent":"find_drugs_by_effect","drug_names":[],"indication_terms":["skeletal muscle relaxant","muscle spasm","musculoskeletal pain","spasticity"]}
 
+Q: "drugs for high blood pressure"
+{"intent":"find_drugs_by_effect","drug_names":[],"indication_terms":["hypertension","essential hypertension","blood pressure reduction"]}
+
 Q: "How do muscles grow?"
+{"intent":"general","drug_names":[],"indication_terms":[]}
+
+Q: "What causes lupus fatigue?"
 {"intent":"general","drug_names":[],"indication_terms":[]}
 """
 

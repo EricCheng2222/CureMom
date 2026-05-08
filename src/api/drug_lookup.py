@@ -82,14 +82,24 @@ class DrugCard:
     dosage: str | None = None
     brand_names: list[str] | None = None
 
-    def to_text(self, max_field_chars: int = 600) -> str:
-        """Format as a compact passage for the LLM context window."""
+    def to_text(self, max_field_chars: int = 1500) -> str:
+        """Format as a compact passage for the LLM context window.
+
+        Default 1500 chars per field — enough to fit the leading paragraph
+        of an FDA Clinical Pharmacology section (where mechanism details
+        usually live for older drugs that lack a dedicated MOA section).
+        """
         def truncate(s: str | None) -> str | None:
             if not s:
                 return None
             s = re.sub(r"\s+", " ", s).strip()
             if len(s) > max_field_chars:
-                return s[:max_field_chars].rsplit(" ", 1)[0] + "…"
+                # Snap to a sentence boundary if one is nearby
+                cut = s[:max_field_chars]
+                last_period = cut.rfind(". ")
+                if last_period > max_field_chars - 200:
+                    return cut[:last_period + 1]
+                return cut.rsplit(" ", 1)[0] + "…"
             return s
 
         lines = [f"DRUG REFERENCE — {self.name.upper()} ({self.source.upper()})"]
