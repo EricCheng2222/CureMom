@@ -154,61 +154,100 @@ def _gather_entities(
 
 # ─── LLM relation extraction ─────────────────────────────────────────────────
 
-_GRAPH_PROMPT = """You build a small biomedical knowledge graph from a question and a synthesized answer.
+_GRAPH_PROMPT = """You build a precise biomedical knowledge graph from a question and a synthesized answer.
 
-The answer is a summary of research papers — it already contains the substance you need.
-Citation markers in the answer look like [1], [2], [3], etc.
+The answer is a summary of research papers. Citation markers look like [1], [2], [3].
 
-Your job has TWO parts:
+Your job has TWO parts.
 
-PART 1 — Canonicalize the entity list.
-You will be given a noisy list of NER-extracted entity candidates. Some are useful (e.g. "skeletal muscle", "growth hormone", "satellite cells", "IGF-1"). Some are fragments or duplicates ("muscles", "muscle", "growth", "hormone", "IGF"). Some are too vague ("life", "type", "physical").
+═══════════════════════════════════════════════════════════════════════
+PART 1 — Pick GOOD entities. You will be given a noisy list of NER candidates plus the answer text. Mine BOTH for entities — the NER list is a hint, not a constraint, but every entity you emit must appear (in some surface form) somewhere in the answer or NER list.
 
-Produce a clean canonical entity list:
-  - Pick a SHORT, specific canonical label for each real concept (e.g. "skeletal muscle", not "muscle").
-  - Fold duplicates and fragments under that canonical label as "aliases".
-  - DROP entities that are too vague ("life", "type", "physical", "mass", "training" alone, "diet" alone, generic adjectives).
-  - DROP entities that don't appear (in some form) in the candidate list — do not invent.
-  - Pick ONE type from: CHEMICAL, DISEASE, GENE_OR_GENE_PRODUCT, ANATOMY, SYMPTOM, PROCEDURE, CELL_TYPE, ORGANISM, OTHER.
+GOOD entities (always include if mentioned):
+  ✓ Named genes/proteins:        myostatin, IGF-1, METTL3, mTORC1, AKT, PI3K, klotho, TGF-beta
+  ✓ Named pathways:              IGF/PI3K/AKT/mTORC1 pathway, JAK-STAT, NF-kB
+  ✓ Named cell types:            satellite cells, myoblasts, myofibers
+  ✓ Named drugs/compounds:       hydroxychloroquine, curcumin, leucine
+  ✓ Specific tissues:            skeletal muscle, lupus nephritis, dermis
+  ✓ Specific phenotypes/states:  muscle hypertrophy, muscle wasting, atrophy, anabolic state
+  ✓ Specific procedures:         resistance training, autophagy, protein synthesis
 
-PART 2 — Extract directed relations between canonical entities.
-Look for every distinct mechanism stated in the answer. Each relation has:
-  - subject:    a canonical entity label
-  - predicate:  a 1-3 word lowercase verb phrase (e.g. "stimulates", "inhibits", "treats", "causes", "activates", "regulates", "reduces", "promotes")
-  - object:     a canonical entity label
-  - citations:  the [N] numbers that appear in the answer near where this mechanism is stated
+BAD entities (DROP THESE — never emit):
+  ✗ Generic single words:        "protein", "proteins", "RNA", "DNA", "cell", "cells", "gene"
+                                 "tissue", "molecular", "cellular", "modification"
+  ✗ Adjectives without a noun:   "physical", "chronic", "acute", "mechanical"
+  ✗ Verbs/actions without object: "growth", "wasting" alone (use "muscle growth", "muscle wasting")
+  ✗ Hypernyms when a hyponym exists:  drop "protein" if "myostatin" is also present;
+                                       drop "pathway" if "IGF/PI3K pathway" is present.
 
-Output ONLY this JSON shape (no prose, no markdown fences):
+For each entity emit:
+  - label:    SHORT specific canonical name (e.g. "skeletal muscle", not "muscle"; "myostatin", not "protein")
+  - type:     ONE of CHEMICAL, DISEASE, GENE_OR_GENE_PRODUCT, ANATOMY, SYMPTOM, PROCEDURE, CELL_TYPE, ORGANISM, OTHER
+  - aliases:  surface forms / abbreviations that should fold into this entity (e.g. ["GH"] for "growth hormone")
+
+═══════════════════════════════════════════════════════════════════════
+PART 2 — Extract SPECIFIC directed relations. Each relation has subject, predicate, object, citations.
+
+PREDICATES MUST BE SPECIFIC. Use verbs the answer actually uses:
+  ✓ activates, inhibits, promotes, stimulates, suppresses, regulates,
+    phosphorylates, binds, produces, secretes, releases,
+    treats, causes, reduces, reverses, induces, blocks,
+    is downstream of, is upstream of, is part of
+
+NEVER use these vague predicates — the graph becomes meaningless:
+  ✗ "is managed by"          ← MEANINGLESS
+  ✗ "is controlled by"       ← TOO VAGUE; use "is regulated by" or "is inhibited by"
+  ✗ "involves"               ← MEANINGLESS
+  ✗ "relates to"             ← MEANINGLESS
+  ✗ "is associated with"     ← only as last resort
+  ✗ "is increased by"        ← VAGUE; use "is stimulated by", "is promoted by"
+  ✗ "depends on"             ← VAGUE
+
+EMIT CHAINS, NOT STARS. If the answer says "A activates B which activates C", emit BOTH:
+  {"subject":"A","predicate":"activates","object":"B"}
+  {"subject":"B","predicate":"activates","object":"C"}
+NOT just one star edge from "A" to "C".
+
+Pathway rule: name the pathway as ONE entity ("IGF/PI3K/AKT/mTORC1 pathway"), then emit edges to/from it. Do NOT split it into separate "PI3K", "AKT", "mTORC1" entities unless the answer specifically describes the steps between them.
+
+═══════════════════════════════════════════════════════════════════════
+OUTPUT — exactly this JSON shape, no prose, no markdown:
 
 {
-  "entities": [
-    {"label": "<canonical label>", "type": "<TYPE>", "aliases": ["<surface form>", ...]}
-  ],
-  "relations": [
-    {"subject": "<canonical label>", "predicate": "<verb phrase>", "object": "<canonical label>", "citations": [<int>, ...]}
-  ]
+  "entities": [{"label":"...","type":"...","aliases":[...]}],
+  "relations": [{"subject":"...","predicate":"...","object":"...","citations":[<ints>]}]
 }
 
 Rules:
-  - Subject/object in `relations` MUST exactly match a `label` in your `entities` list.
-  - Each relation should cite at least one [N] from the answer if one is nearby; if no [N] is associated, emit an empty array — the relation will still be kept.
-  - Aim for COVERAGE — emit every distinct mechanism. Chains are good: if A activates B and B promotes C, emit both.
-  - Up to 25 entities and 18 relations.
+  - Up to 25 entities and 25 relations. Quality > quantity.
+  - Every relation must have a SPECIFIC predicate (not from the BAD list).
+  - Subject/object should match an entity label (exact or substring overlap).
+  - Each relation may cite the [N] numbers nearest the supporting sentence; an empty array is allowed.
 
-Example (illustrative, do not copy):
-Answer: "Growth hormone (GH) stimulates the liver to produce IGF-1 [1], which promotes skeletal muscle hypertrophy [1,2]."
-Candidates: ["growth hormone", "GH", "IGF-1", "IGF", "liver", "muscle", "skeletal muscle"]
+═══════════════════════════════════════════════════════════════════════
+WORKED EXAMPLE (do not copy values, learn the shape):
+
+Answer: "Growth hormone (GH) stimulates the liver to produce IGF-1 [1], which activates the PI3K/AKT/mTOR pathway in skeletal muscle to promote hypertrophy [1,2]. Myostatin opposes this by inhibiting protein synthesis [3]."
+
+Candidates: ["growth hormone","GH","IGF-1","IGF","liver","PI3K","AKT","mTOR","muscle","skeletal muscle","hypertrophy","myostatin","protein synthesis","protein"]
+
 Output:
 {"entities":[
   {"label":"growth hormone","type":"CHEMICAL","aliases":["GH"]},
   {"label":"IGF-1","type":"GENE_OR_GENE_PRODUCT","aliases":["IGF"]},
   {"label":"liver","type":"ANATOMY","aliases":[]},
-  {"label":"skeletal muscle","type":"ANATOMY","aliases":["muscle"]}
+  {"label":"PI3K/AKT/mTOR pathway","type":"PROCEDURE","aliases":["PI3K","AKT","mTOR"]},
+  {"label":"skeletal muscle","type":"ANATOMY","aliases":["muscle"]},
+  {"label":"muscle hypertrophy","type":"SYMPTOM","aliases":["hypertrophy"]},
+  {"label":"myostatin","type":"GENE_OR_GENE_PRODUCT","aliases":[]},
+  {"label":"protein synthesis","type":"PROCEDURE","aliases":[]}
  ],
  "relations":[
   {"subject":"growth hormone","predicate":"stimulates","object":"liver","citations":[1]},
   {"subject":"liver","predicate":"produces","object":"IGF-1","citations":[1]},
-  {"subject":"IGF-1","predicate":"promotes","object":"skeletal muscle","citations":[1,2]}
+  {"subject":"IGF-1","predicate":"activates","object":"PI3K/AKT/mTOR pathway","citations":[1,2]},
+  {"subject":"PI3K/AKT/mTOR pathway","predicate":"promotes","object":"muscle hypertrophy","citations":[2]},
+  {"subject":"myostatin","predicate":"inhibits","object":"protein synthesis","citations":[3]}
  ]
 }"""
 
@@ -331,6 +370,10 @@ def _build_canonical_nodes(
         label = (e.get("label") or "").strip()
         if not label:
             continue
+        # Drop fragment-only generic terms ("molecular", "RNA", "protein"...)
+        # They carry no biological meaning as graph nodes and clutter the canvas.
+        if label.lower() in _VAGUE_LABELS:
+            continue
         etype = e.get("type") or "OTHER"
         if etype not in _KNOWN_TYPES:
             etype = "OTHER"
@@ -383,6 +426,30 @@ def _build_canonical_nodes(
     return list(canonical.values()), label_to_id
 
 
+# Predicates that carry no biological information. We strip relations using
+# any of these so the graph stays meaningful. The LLM is told to avoid them
+# in the prompt, but small models still emit them — server-side guard.
+_VAGUE_PREDICATES = {
+    "is managed by", "is controlled by", "is involved in", "involves",
+    "relates to", "is related to", "is associated with",
+    "is increased by", "is decreased by", "is affected by", "affects",
+    "depends on", "is dependent on",
+    "interacts with", "interaction with",
+    "is",  "has", "are",
+}
+
+# Single-word generic biological terms that NER often picks up but that
+# carry no meaning as graph nodes. We drop them at edge-build time when
+# they appear as a node id.
+_VAGUE_LABELS = {
+    "protein", "proteins", "rna", "dna", "cell", "cells", "gene", "genes",
+    "tissue", "tissues", "molecular", "cellular", "modification",
+    "molecule", "molecules", "process", "pathway", "system",
+    "physical", "chronic", "acute", "mechanical",
+    "growth", "wasting",   # too generic without a body part qualifier
+}
+
+
 def _build_edges(
     raw_relations: list[dict[str, Any]],
     label_to_id: dict[str, str],
@@ -410,6 +477,13 @@ def _build_edges(
         obj  = (r.get("object")  or "").strip().lower()
         pred = (r.get("predicate") or "").strip().lower()
         if not subj or not obj or not pred or subj == obj:
+            continue
+
+        # Drop relations whose endpoints are pure-fragment generic terms.
+        if subj in _VAGUE_LABELS or obj in _VAGUE_LABELS:
+            continue
+        # Drop relations with vague predicates ("is managed by" etc.).
+        if pred in _VAGUE_PREDICATES:
             continue
 
         s_id = label_to_id.get(subj)
