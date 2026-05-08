@@ -229,13 +229,13 @@ def _ollama_graph(
     Tunable via env:
       OLLAMA_GRAPH_MODEL    — override model (default = OLLAMA_MODEL)
       GRAPH_NUM_CTX         — context tokens (default 16384)
-      GRAPH_TIMEOUT_S       — request timeout (default 180s = 3 min)
+      GRAPH_TIMEOUT_S       — request timeout (default 600s = 10 min)
     """
     base = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
     model = os.environ.get("OLLAMA_GRAPH_MODEL") or os.environ.get("OLLAMA_MODEL", "medgemma:4b")
     num_ctx = int(os.environ.get("GRAPH_NUM_CTX", "16384"))
     if timeout_s is None:
-        timeout_s = float(os.environ.get("GRAPH_TIMEOUT_S", "180"))
+        timeout_s = float(os.environ.get("GRAPH_TIMEOUT_S", "600"))
 
     # Sort candidates longest-first so multi-word entities (which the LLM
     # should prefer as canonical labels) appear at the top of the list.
