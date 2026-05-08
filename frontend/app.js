@@ -102,6 +102,226 @@ populateProviderDropdowns().catch(err => {
   console.error('[providers] populate failed:', err);
 });
 
+// ── Knowledge graph panel ───────────────────────────────────────────────────
+// The graph is session-local and grows with each Q&A turn. After every
+// answer we POST to /api/v1/graph_extract with the question, the cleaned
+// answer text, and the cited chunks; the backend runs NER + LLM JSON-mode
+// to emit nodes/edges, and KGraph.merge() folds them into the canvas.
+let _graphInitialized = false;
+const GRAPH_PREF_KEY = 'curemom.graphPanelOpen';
+
+function setupKnowledgeGraph() {
+  // Default the panel to OPEN unless the user has explicitly closed it before.
+  const panel = document.getElementById('graph-panel');
+  if (!panel) return;
+  const savedPref = localStorage.getItem(GRAPH_PREF_KEY);
+  const startOpen = savedPref === null ? true : savedPref === '1';
+  if (startOpen) panel.classList.remove('collapsed');
+  document.getElementById('graph-toggle-btn')?.classList.toggle('active', startOpen);
+
+  // Initialize Cytoscape lazily on first open OR right now if we're starting open.
+  if (startOpen) ensureGraphInit();
+
+  // Wire action buttons
+  document.getElementById('graph-clear-btn')?.addEventListener('click', () => {
+    if (!_graphInitialized) return;
+    KGraph.clear();
+    _refreshGraphChrome();
+    _hidePopover();
+  });
+  document.getElementById('graph-export-btn')?.addEventListener('click', () => {
+    if (!_graphInitialized) return;
+    const payload = KGraph.exportJSON();
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `curemom-graph-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  });
+}
+
+function ensureGraphInit() {
+  if (_graphInitialized) return;
+  if (typeof KGraph === 'undefined') return;
+  const canvas = document.getElementById('graph-canvas');
+  if (!canvas) return;
+  KGraph.init(canvas);
+  KGraph.onNodeClick(_onGraphNodeClick);
+  _graphInitialized = true;
+  _refreshGraphChrome();
+}
+
+function toggleGraphPanel() {
+  const panel = document.getElementById('graph-panel');
+  if (!panel) return;
+  const isCollapsed = panel.classList.toggle('collapsed');
+  document.getElementById('graph-toggle-btn')?.classList.toggle('active', !isCollapsed);
+  localStorage.setItem(GRAPH_PREF_KEY, isCollapsed ? '0' : '1');
+  if (!isCollapsed) {
+    ensureGraphInit();
+    // Cytoscape needs a resize/fit after the container becomes visible.
+    setTimeout(() => {
+      if (window.cytoscape && document.getElementById('graph-canvas')?._cyreg?.cy) {
+        document.getElementById('graph-canvas')._cyreg.cy.resize();
+        document.getElementById('graph-canvas')._cyreg.cy.fit(undefined, 30);
+      }
+    }, 50);
+  } else {
+    _hidePopover();
+  }
+}
+
+function _isGraphPanelOpen() {
+  const panel = document.getElementById('graph-panel');
+  return panel && !panel.classList.contains('collapsed');
+}
+
+function _refreshGraphChrome() {
+  if (!_graphInitialized) return;
+  const { nodes, edges } = KGraph.size();
+  const empty = document.getElementById('graph-empty');
+  const status = document.getElementById('graph-status');
+  if (empty) empty.classList.toggle('hidden', nodes > 0);
+  if (status) status.textContent = nodes > 0 ? `${nodes} node${nodes !== 1 ? 's' : ''} · ${edges} edge${edges !== 1 ? 's' : ''}` : '';
+}
+
+function _showGraphSpinner(show) {
+  const sp = document.getElementById('graph-spinner');
+  if (sp) sp.hidden = !show;
+}
+
+// Clean the assistant response into prose suitable for graph extraction.
+// Same idea as pushAssistantToHistory but kept local so we can call it
+// before pushing to history.
+function _cleanForGraph(text) {
+  let t = text || '';
+  t = t.replace(/(?:\n|^)\s*(?:\*+|#+)?\s*(?:you\s+might\s+also\s+want\s+to\s+know|follow[-\s]?up\s+questions|suggested\s+questions|related\s+questions)\s*:?\s*\*?\*?[\s\S]*$/i, '');
+  t = t.replace(/this is for information only[^\n]*/gi, '');
+  t = t.replace(/\[\d+\]/g, '');
+  t = t.replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+  return t;
+}
+
+async function _extractGraph(query, response, citations) {
+  if (!_isGraphPanelOpen()) return;       // Don't spend LLM tokens if user has hidden the panel
+  ensureGraphInit();
+  const cleanAnswer = _cleanForGraph(response);
+  if (!cleanAnswer || cleanAnswer.length < 10) return;
+  const chunks = (citations || [])
+    .map(c => ({ id: c.chunk_id, text: c.chunk?.text || '' }))
+    .filter(c => Number.isFinite(c.id) && c.text);
+  if (!chunks.length) return;
+
+  _showGraphSpinner(true);
+  try {
+    const r = await fetch(`${API}/api/v1/graph_extract`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query, answer: cleanAnswer, chunks }),
+    });
+    if (!r.ok) {
+      console.warn('[graph_extract] returned', r.status);
+      return;
+    }
+    const payload = await r.json();
+    KGraph.merge(payload);
+    _refreshGraphChrome();
+  } catch (err) {
+    console.warn('[graph_extract] fetch failed:', err);
+  } finally {
+    _showGraphSpinner(false);
+  }
+}
+
+// ── Node-click popover ──────────────────────────────────────────────────────
+// `nodePayload` is null when the user clicks the canvas background.
+function _onGraphNodeClick(nodePayload) {
+  if (!nodePayload) { _hidePopover(); return; }
+  const wrap = document.querySelector('.graph-canvas-wrap');
+  const pop  = document.getElementById('graph-popover');
+  if (!wrap || !pop) return;
+
+  // Build popover content
+  const cites = (nodePayload.citations || []).slice().sort((a, b) => a - b);
+  const citePills = cites.length
+    ? `<div class="popover-citations">${cites.map(c => {
+        // Try to map chunk_id back to a citation index in the most recent
+        // assistant bubble's pill list. If found, render the index for clarity;
+        // otherwise show the raw chunk id as a fallback.
+        const idx = _lookupCitationIndexByChunkId(c);
+        return `<span class="popover-cite-pill" data-cid="${c}">${idx ? `[${idx}]` : `c${c}`}</span>`;
+      }).join('')}</div>`
+    : `<div class="popover-empty-cites">No citations from the most recent answer mention this entity yet.</div>`;
+
+  pop.innerHTML = `
+    <button class="popover-close-x" aria-label="Close">×</button>
+    <div class="popover-header">
+      <div class="popover-label">${escapeHtml(nodePayload.label)}</div>
+      <div class="popover-type-chip">${escapeHtml(_humanizeType(nodePayload.type))}</div>
+    </div>
+    ${citePills}
+    <button class="popover-ask-btn">Ask about this</button>
+  `;
+
+  // Position near the node, clamped to the canvas wrap
+  const wrapRect = wrap.getBoundingClientRect();
+  const pos = nodePayload.renderedPosition || { x: wrapRect.width / 2, y: wrapRect.height / 2 };
+  pop.style.left = Math.max(10, Math.min(wrapRect.width - 280, pos.x + 18)) + 'px';
+  pop.style.top  = Math.max(10, Math.min(wrapRect.height - 140, pos.y + 12)) + 'px';
+  pop.hidden = false;
+
+  pop.querySelector('.popover-close-x')?.addEventListener('click', _hidePopover);
+  pop.querySelector('.popover-ask-btn')?.addEventListener('click', () => {
+    const ta = document.getElementById('consumer-input');
+    if (!ta) return;
+    ta.value = `Tell me more about ${nodePayload.label} in this context.`;
+    autoResize(ta);
+    ta.focus();
+    _hidePopover();
+  });
+}
+
+function _hidePopover() {
+  const pop = document.getElementById('graph-popover');
+  if (pop) pop.hidden = true;
+}
+
+function _humanizeType(type) {
+  switch (type) {
+    case 'CHEMICAL': return 'Drug / chemical';
+    case 'DISEASE': return 'Disease';
+    case 'GENE_OR_GENE_PRODUCT': return 'Gene / protein';
+    case 'ANATOMY': return 'Anatomy';
+    case 'SYMPTOM': return 'Symptom';
+    case 'PROCEDURE': return 'Procedure';
+    case 'CELL_TYPE': return 'Cell type';
+    case 'ORGANISM': return 'Organism';
+    default: return 'Entity';
+  }
+}
+
+// Map a chunk_id to its 1-based citation index in the latest AI bubble, if
+// such a mapping exists. The bubble already encodes chunk_id via its data
+// attributes when rendered (we do this below); falls back to null.
+function _lookupCitationIndexByChunkId(chunkId) {
+  const bubbles = document.querySelectorAll('.msg-ai .citation-pill[data-chunk-id]');
+  for (const el of bubbles) {
+    if (parseInt(el.dataset.chunkId, 10) === chunkId) {
+      const num = el.querySelector('.cite-num');
+      if (num) return parseInt(num.textContent, 10);
+    }
+  }
+  return null;
+}
+
+// Initialize once DOM is ready (this script is loaded at end of body, so
+// the elements are already there).
+setupKnowledgeGraph();
+
 // ── Consumer chat ────────────────────────────────────────────────────────────
 // Rolling chat history sent with each request so the LLM has multi-turn
 // context. Past assistant turns are stored WITHOUT [N] markers and
@@ -167,6 +387,9 @@ async function sendConsumerMessage() {
     // appendUserBubble; here we add the assistant response as clean prose
     // (strip [N] markers + disclaimer + follow-up section).
     pushAssistantToHistory(response);
+    // Fire-and-forget: extract knowledge-graph nodes/edges in the background
+    // and merge into the side panel. Won't block the UI.
+    _extractGraph(query, response, data.citations ?? []);
   } catch {
     removeTypingBubble(typing);
     appendAIBubble('Could not reach the API. Make sure the server is running.', []);
@@ -262,7 +485,7 @@ function appendAIBubble(text, citations) {
   let citeHtml = '';
   if (citations.length) {
     const pills = citations.slice(0, 5).map((c, i) => `
-      <button class="citation-pill" onclick="openModal(${JSON.stringify(c).replace(/"/g, '&quot;')})">
+      <button class="citation-pill" data-chunk-id="${c.chunk_id}" onclick="openModal(${JSON.stringify(c).replace(/"/g, '&quot;')})">
         <div class="cite-num">${i + 1}</div>
         <div class="cite-meta">
           <strong>${escapeHtml(c.title ?? 'Unknown title')}</strong><br>

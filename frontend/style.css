@@ -35,6 +35,15 @@
   --red:   #F87171;
   --amber: #FBBF24;
 
+  /* Knowledge-graph node-type colors */
+  --node-chemical: #34D399;     /* drugs / chemicals — green */
+  --node-disease:  #F87171;     /* diseases — red */
+  --node-gene:     #818CF8;     /* genes / proteins — indigo */
+  --node-anatomy:  #FBBF24;     /* anatomy / tissues — amber */
+  --node-symptom:  #FB7185;     /* symptoms — rose */
+  --node-procedure:#A78BFA;     /* procedures — violet */
+  --node-default:  #94A3B8;     /* other — slate */
+
   --radius-sm: 8px;
   --radius:    12px;
   --radius-lg: 18px;
@@ -914,8 +923,262 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); }
 ::-webkit-scrollbar-thumb { background: rgba(255,255,255,.08); border-radius: 99px; }
 ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,.18); }
 
+/* ═══════════════════════════════════════════════ KNOWLEDGE GRAPH PANEL ══ */
+.graph-panel {
+  flex: 1 1 0;
+  min-width: 380px;
+  max-width: 60%;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-2);
+  border-left: 1px solid var(--border);
+  overflow: hidden;
+}
+.graph-panel.collapsed { display: none; }
+
+.graph-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 52px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  background: var(--bg-2);
+}
+.graph-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--text-2);
+  letter-spacing: 0.2px;
+}
+.graph-title svg { color: var(--indigo); }
+.graph-status {
+  font-size: 11px;
+  color: var(--muted);
+  font-weight: 500;
+  margin-left: 4px;
+}
+.graph-actions {
+  display: flex;
+  gap: 6px;
+}
+.graph-action-btn {
+  background: transparent;
+  border: 1px solid var(--border-2);
+  color: var(--text-3);
+  padding: 5px 10px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.graph-action-btn:hover {
+  background: var(--surface-2);
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+.graph-canvas-wrap {
+  flex: 1;
+  position: relative;
+  background:
+    radial-gradient(circle at 25% 30%, rgba(129,140,248,.04), transparent 50%),
+    radial-gradient(circle at 75% 70%, rgba(52,211,153,.04), transparent 50%),
+    var(--bg);
+  overflow: hidden;
+}
+.graph-canvas {
+  position: absolute;
+  inset: 0;
+}
+
+.graph-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 36px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+  pointer-events: none;
+}
+.graph-empty.hidden { display: none; }
+
+.graph-spinner {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  display: flex;
+  gap: 4px;
+  background: var(--surface);
+  padding: 6px 10px;
+  border-radius: 99px;
+  border: 1px solid var(--border-2);
+  box-shadow: var(--shadow-sm);
+}
+.spinner-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--indigo);
+  animation: spinner-pulse 1.2s ease-in-out infinite;
+}
+.spinner-dot:nth-child(2) { animation-delay: 0.15s; }
+.spinner-dot:nth-child(3) { animation-delay: 0.3s; }
+@keyframes spinner-pulse {
+  0%, 80%, 100% { opacity: 0.3; transform: scale(0.8); }
+  40% { opacity: 1; transform: scale(1.1); }
+}
+
+.graph-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-2);
+  flex-shrink: 0;
+}
+.legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-3);
+}
+.legend-swatch {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+/* Popover shown when a node is clicked */
+.graph-popover {
+  position: absolute;
+  z-index: 20;
+  min-width: 240px;
+  max-width: 320px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  box-shadow: var(--shadow-lg);
+  font-size: 13px;
+  color: var(--text);
+}
+.popover-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.popover-label {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--text);
+  flex: 1;
+  word-break: break-word;
+}
+.popover-type-chip {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  padding: 3px 7px;
+  border-radius: 99px;
+  background: var(--surface-2);
+  color: var(--text-2);
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.popover-citations {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 6px 0 10px;
+}
+.popover-cite-pill {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 8px;
+  border-radius: 99px;
+  background: var(--indigo-soft);
+  color: var(--indigo);
+  border: 1px solid rgba(129,140,248,.25);
+}
+.popover-empty-cites {
+  font-size: 11px;
+  color: var(--muted);
+  margin: 4px 0 10px;
+}
+.popover-ask-btn {
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: linear-gradient(135deg, var(--indigo) 0%, var(--indigo-d) 100%);
+  color: #fff;
+  border: none;
+  font-weight: 600;
+  font-size: 12px;
+  cursor: pointer;
+  transition: filter 0.15s;
+}
+.popover-ask-btn:hover { filter: brightness(1.08); }
+.popover-close-x {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  padding: 2px 6px;
+}
+.popover-close-x:hover { color: var(--text); }
+
+/* Topbar toggle button (in chat-topbar) */
+.topbar-graph-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: transparent;
+  border: 1px solid var(--border-2);
+  color: var(--text-2);
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  margin-right: 8px;
+  transition: all 0.15s;
+}
+.topbar-graph-btn:hover {
+  background: var(--surface-2);
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+.topbar-graph-btn.active {
+  background: var(--indigo-soft);
+  color: var(--indigo);
+  border-color: rgba(129,140,248,.4);
+}
+
 /* ═══════════════════════════════════════════════════════ RESPONSIVE ══════ */
 @media (max-width: 700px) {
   .sidebar { display: none; }
   .land-h1 { letter-spacing: -.8px; }
+  .graph-panel { display: none !important; }
+}
+@media (max-width: 1100px) {
+  .graph-panel { max-width: 50%; min-width: 320px; }
 }

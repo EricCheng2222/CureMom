@@ -32,6 +32,7 @@ from ..search.mesh_expander import MeSHExpander
 from .classifier import classify_query
 from .citation_verifier import verify_citations, warnings_to_dicts
 from .drug_lookup import lookup_drugs_for_query
+from .graph_extractor import extract_graph
 from .llm_providers import get_provider
 from .response_builder import build_response, response_to_dict
 
@@ -139,6 +140,17 @@ class QueryRequest(BaseModel):
     # entry should be just the answer text (no [N] markers, no source list);
     # the frontend strips those before sending.
     history: list[ChatMessage] = Field(default_factory=list)
+
+
+class GraphChunkRef(BaseModel):
+    id: int
+    text: str = Field(..., max_length=20000)
+
+
+class GraphExtractRequest(BaseModel):
+    query: str = Field(..., min_length=3, max_length=2000)
+    answer: str = Field(..., min_length=1, max_length=20000)
+    chunks: list[GraphChunkRef] = Field(default_factory=list, max_length=20)
 
 
 # ─── Endpoints ───────────────────────────────────────────────────────────────
@@ -289,6 +301,33 @@ async def query(
     if drug_card_names:
         output["metadata"]["drug_cards"] = drug_card_names
     return output
+
+
+@app.post("/api/v1/graph_extract")
+async def graph_extract(req: GraphExtractRequest) -> dict[str, Any]:
+    """Per-turn knowledge-graph payload for the chat panel.
+
+    Called by the frontend AFTER the answer renders. Runs biomedical NER
+    over the question + answer + cited chunk texts, then asks the LLM to
+    emit JSON triples between those entities. Hallucinated triples
+    (entities not in the NER set, or with no evidence chunk_ids) are
+    dropped server-side. The frontend merges the returned nodes/edges
+    into its session-local graph state.
+
+    This is a separate endpoint from /api/v1/query so the chat answer
+    can render at its current speed; the graph spinner waits on the
+    second LLM call without blocking the user.
+    """
+    chunk_dicts = [{"id": c.id, "text": c.text} for c in req.chunks]
+    try:
+        payload = extract_graph(req.query, req.answer, chunk_dicts)
+    except Exception as exc:
+        logger.exception("graph_extract failed")
+        raise HTTPException(
+            status_code=502,
+            detail=f"graph_extract failed: {type(exc).__name__}: {exc}",
+        )
+    return payload.to_dict()
 
 
 @app.get("/api/v1/papers/{pmid}")
@@ -564,6 +603,10 @@ async def _serve_css():
 @app.get("/app.js", include_in_schema=False)
 async def _serve_js():
     return FileResponse(str(_frontend_dir / "app.js"), media_type="application/javascript")
+
+@app.get("/graph.js", include_in_schema=False)
+async def _serve_graph_js():
+    return FileResponse(str(_frontend_dir / "graph.js"), media_type="application/javascript")
 
 # StaticFiles handles any other assets (fonts, images, etc.)
 if _frontend_dir.exists():

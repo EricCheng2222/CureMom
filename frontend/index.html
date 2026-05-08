@@ -7,7 +7,11 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="style.css?v=2" />
+  <link rel="stylesheet" href="style.css?v=3" />
+  <script src="https://unpkg.com/cytoscape@3.30.4/dist/cytoscape.min.js"></script>
+  <script src="https://unpkg.com/layout-base@2.0.1/layout-base.js"></script>
+  <script src="https://unpkg.com/cose-base@2.2.0/cose-base.js"></script>
+  <script src="https://unpkg.com/cytoscape-fcose@2.2.0/cytoscape-fcose.js"></script>
 </head>
 <body>
 
@@ -111,6 +115,15 @@
     <div class="chat-area">
       <div class="chat-topbar">
         <div class="chat-topbar-title">Patient Assistant</div>
+        <button class="topbar-graph-btn" id="graph-toggle-btn" onclick="toggleGraphPanel()" title="Toggle knowledge graph">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+            <circle cx="3.5" cy="3.5" r="2" stroke="currentColor" stroke-width="1.6"/>
+            <circle cx="12.5" cy="3.5" r="2" stroke="currentColor" stroke-width="1.6"/>
+            <circle cx="8" cy="12" r="2" stroke="currentColor" stroke-width="1.6"/>
+            <path d="M5 4.5L11 4.5M4.5 5L7 10.5M11.5 5L9 10.5" stroke="currentColor" stroke-width="1.4"/>
+          </svg>
+          <span>Graph</span>
+        </button>
         <button class="topbar-mode-btn" onclick="switchMode('professional')">Researcher mode →</button>
       </div>
 
@@ -154,6 +167,42 @@
         </div>
       </div>
     </div>
+
+    <aside class="graph-panel collapsed" id="graph-panel">
+      <div class="graph-topbar">
+        <div class="graph-title">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+            <circle cx="3" cy="3" r="1.6" stroke="currentColor" stroke-width="1.4"/>
+            <circle cx="11" cy="3" r="1.6" stroke="currentColor" stroke-width="1.4"/>
+            <circle cx="7" cy="11" r="1.6" stroke="currentColor" stroke-width="1.4"/>
+            <path d="M4.4 3.5L9.6 3.5M4 4L6.4 9.6M10 4L7.6 9.6" stroke="currentColor" stroke-width="1.2"/>
+          </svg>
+          <span>Knowledge graph</span>
+          <span class="graph-status" id="graph-status"></span>
+        </div>
+        <div class="graph-actions">
+          <button class="graph-action-btn" id="graph-clear-btn" title="Clear graph">Clear</button>
+          <button class="graph-action-btn" id="graph-export-btn" title="Export JSON">Export</button>
+        </div>
+      </div>
+      <div class="graph-canvas-wrap">
+        <div id="graph-canvas" class="graph-canvas"></div>
+        <div id="graph-empty" class="graph-empty">
+          Ask a question on the left — entities and how they relate will appear here as the conversation progresses.
+        </div>
+        <div id="graph-spinner" class="graph-spinner" hidden>
+          <div class="spinner-dot"></div><div class="spinner-dot"></div><div class="spinner-dot"></div>
+        </div>
+        <div id="graph-popover" class="graph-popover" hidden></div>
+      </div>
+      <div class="graph-legend">
+        <span class="legend-item"><span class="legend-swatch" style="background:var(--node-chemical)"></span>Drug/chemical</span>
+        <span class="legend-item"><span class="legend-swatch" style="background:var(--node-disease)"></span>Disease</span>
+        <span class="legend-item"><span class="legend-swatch" style="background:var(--node-gene)"></span>Gene/protein</span>
+        <span class="legend-item"><span class="legend-swatch" style="background:var(--node-anatomy)"></span>Anatomy</span>
+        <span class="legend-item"><span class="legend-swatch" style="background:var(--node-symptom)"></span>Symptom</span>
+      </div>
+    </aside>
 
   </div>
 </div>
@@ -263,6 +312,7 @@
   </div>
 </div>
 
-<script src="app.js?v=3"></script>
+<script src="graph.js?v=1"></script>
+<script src="app.js?v=4"></script>
 </body>
 </html>
