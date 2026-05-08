@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="style.css?v=4" />
+  <link rel="stylesheet" href="style.css?v=5" />
   <script src="https://unpkg.com/cytoscape@3.30.4/dist/cytoscape.min.js"></script>
   <script src="https://unpkg.com/layout-base@2.0.1/layout-base.js"></script>
   <script src="https://unpkg.com/cose-base@2.2.0/cose-base.js"></script>
@@ -189,6 +189,7 @@
           </button>
           <button class="graph-icon-btn" id="graph-zoom-in-btn" title="Zoom in">+</button>
           <span class="graph-action-divider"></span>
+          <button class="graph-action-btn" id="graph-merge-btn" title="Ask the LLM to dedup equivalent entities (e.g. B-cell ≡ B cell)">Merge</button>
           <button class="graph-action-btn" id="graph-clear-btn" title="Clear graph">Clear</button>
           <button class="graph-action-btn" id="graph-export-btn" title="Export JSON">Export</button>
         </div>
@@ -320,7 +321,7 @@
   </div>
 </div>
 
-<script src="graph.js?v=6"></script>
-<script src="app.js?v=11"></script>
+<script src="graph.js?v=7"></script>
+<script src="app.js?v=12"></script>
 </body>
 </html>

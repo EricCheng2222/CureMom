@@ -163,6 +163,7 @@ function setupKnowledgeGraph() {
     ensureGraphInit();
     KGraph.fit();
   });
+  document.getElementById('graph-merge-btn')?.addEventListener('click', _onMergeClick);
 
   // When the panel is shown after being hidden, the canvas needs a resize.
   // Also resize on window resize so labels don't get clipped.
@@ -221,13 +222,63 @@ function _isGraphPanelOpen() {
   return panel && !panel.classList.contains('collapsed');
 }
 
-function _refreshGraphChrome() {
+function _refreshGraphChrome(overrideStatus) {
   if (!_graphInitialized) return;
   const { nodes, edges } = KGraph.size();
   const empty = document.getElementById('graph-empty');
   const status = document.getElementById('graph-status');
   if (empty) empty.classList.toggle('hidden', nodes > 0);
-  if (status) status.textContent = nodes > 0 ? `${nodes} node${nodes !== 1 ? 's' : ''} · ${edges} edge${edges !== 1 ? 's' : ''}` : '';
+  if (status) {
+    if (overrideStatus) {
+      status.textContent = overrideStatus;
+    } else {
+      status.textContent = nodes > 0 ? `${nodes} node${nodes !== 1 ? 's' : ''} · ${edges} edge${edges !== 1 ? 's' : ''}` : '';
+    }
+  }
+}
+
+async function _onMergeClick() {
+  if (!_graphInitialized) {
+    console.log('[KGraph] merge skipped — graph not initialized');
+    return;
+  }
+  const { nodes } = KGraph.size();
+  if (nodes < 2) {
+    console.log('[KGraph] merge skipped — need at least 2 nodes');
+    return;
+  }
+  const labels = KGraph.exportJSON().nodes.map(n => n.label);
+  const provider = document.getElementById('consumer-provider')?.value || null;
+  const btn = document.getElementById('graph-merge-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Merging…'; }
+  console.log('[KGraph] POST /api/v1/graph_dedup with', labels.length, 'labels, provider:', provider);
+  try {
+    const r = await fetch(`${API}/api/v1/graph_dedup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ labels, llm_provider: provider }),
+    });
+    if (!r.ok) {
+      console.warn('[KGraph] /graph_dedup HTTP', r.status);
+      return;
+    }
+    const payload = await r.json();
+    const groups = payload.groups || [];
+    console.log('[KGraph] received', groups.length, 'merge groups:', groups);
+    const before = KGraph.size().nodes;
+    const result = KGraph.applyMergeGroups(groups);
+    const after = KGraph.size().nodes;
+    const status = result.groupsApplied > 0
+      ? `Merged ${result.groupsApplied} group${result.groupsApplied !== 1 ? 's' : ''} (${before} → ${after} nodes)`
+      : 'No duplicates found';
+    _refreshGraphChrome(status);
+    // Revert to default chrome after a few seconds.
+    setTimeout(() => _refreshGraphChrome(), 4000);
+  } catch (err) {
+    console.error('[KGraph] dedup failed:', err);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Merge'; }
+  }
 }
 
 function _showGraphSpinner(show) {

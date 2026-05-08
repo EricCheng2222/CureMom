@@ -324,6 +324,135 @@
     if (cy) cy.elements().remove();
   }
 
+  function _slugify(text) {
+    return (text || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'node';
+  }
+
+  function applyMergeGroups(groups) {
+    // groups: [{canonical: string, members: [string, ...]}]
+    // Each member's node folds into the canonical node; incident edges
+    // are redirected; identical edges after redirect get unioned.
+    if (!cy || !Array.isArray(groups) || !groups.length) {
+      return { groupsApplied: 0, nodesRemoved: 0 };
+    }
+
+    // Map each existing node label (case-insensitive) -> id.
+    const labelToId = new Map();
+    for (const node of state.nodes.values()) {
+      labelToId.set(node.label.toLowerCase(), node.id);
+    }
+
+    let groupsApplied = 0;
+    let nodesRemoved = 0;
+
+    for (const g of groups) {
+      const canonicalLabel = (g.canonical || '').trim();
+      const memberLabels = (g.members || []).filter(m => typeof m === 'string').map(m => m.trim());
+      if (!canonicalLabel || memberLabels.length < 2) continue;
+
+      // Resolve member labels to actual node ids in the current graph.
+      const memberIds = [];
+      const seenIds = new Set();
+      for (const lbl of memberLabels) {
+        const id = labelToId.get(lbl.toLowerCase());
+        if (id && !seenIds.has(id)) {
+          memberIds.push(id);
+          seenIds.add(id);
+        }
+      }
+      if (memberIds.length < 2) continue;   // nothing to merge in current graph
+
+      // Pick canonical id: existing node with the canonical label if present,
+      // otherwise the first member id (relabel to the canonical text).
+      let canonicalId = labelToId.get(canonicalLabel.toLowerCase());
+      if (!canonicalId || !memberIds.includes(canonicalId)) {
+        canonicalId = memberIds[0];
+      }
+
+      // Union citations from all members into the canonical node, and adopt
+      // the canonical label (LLM may have picked a different spelling).
+      const canonicalNode = state.nodes.get(canonicalId);
+      if (!canonicalNode) continue;
+      const citeSet = new Set(canonicalNode.citations);
+      for (const mid of memberIds) {
+        if (mid === canonicalId) continue;
+        const m = state.nodes.get(mid);
+        if (!m) continue;
+        for (const c of m.citations) if (!citeSet.has(c)) { canonicalNode.citations.push(c); citeSet.add(c); }
+      }
+      canonicalNode.label = canonicalLabel;
+      const cyCanon = cy.getElementById(canonicalId);
+      if (cyCanon && cyCanon.length) cyCanon.data('label', canonicalLabel);
+
+      // Build a redirect map for the non-canonical members.
+      const redirect = new Map();
+      for (const mid of memberIds) {
+        if (mid !== canonicalId) redirect.set(mid, canonicalId);
+      }
+
+      // Rewrite every edge in state.edges. Self-loops (source==target after
+      // rewrite) are dropped. Identical edges (same s|p|o) are unioned.
+      const newEdges = new Map();
+      for (const edge of state.edges.values()) {
+        const newSource = redirect.get(edge.source) || edge.source;
+        const newTarget = redirect.get(edge.target) || edge.target;
+        if (newSource === newTarget) continue;   // collapsed self-loop
+        const newId = `${newSource}|${edge.predicate}|${newTarget}`;
+        const existing = newEdges.get(newId);
+        if (existing) {
+          const seen = new Set(existing.citations);
+          for (const c of edge.citations) if (!seen.has(c)) { existing.citations.push(c); seen.add(c); }
+        } else {
+          newEdges.set(newId, {
+            id: newId,
+            source: newSource,
+            target: newTarget,
+            predicate: edge.predicate,
+            citations: edge.citations.slice(),
+          });
+        }
+      }
+
+      // Sync state.edges → drop ones not in newEdges, add new ones.
+      const oldEdgeIds = new Set(state.edges.keys());
+      const newEdgeIds = new Set(newEdges.keys());
+      for (const oldId of oldEdgeIds) {
+        if (!newEdgeIds.has(oldId)) {
+          state.edges.delete(oldId);
+          const cyEdge = cy.getElementById(oldId);
+          if (cyEdge && cyEdge.length) cyEdge.remove();
+        }
+      }
+      for (const [newId, edge] of newEdges) {
+        const existing = state.edges.get(newId);
+        if (existing) {
+          existing.citations = edge.citations;
+        } else {
+          state.edges.set(newId, edge);
+          cy.add({
+            group: 'edges',
+            data: { id: edge.id, source: edge.source, target: edge.target, predicate: edge.predicate },
+          });
+        }
+      }
+
+      // Remove non-canonical member nodes from state and canvas.
+      for (const mid of memberIds) {
+        if (mid === canonicalId) continue;
+        state.nodes.delete(mid);
+        labelToId.delete((state.nodes.get(mid)?.label || '').toLowerCase());
+        const cyNode = cy.getElementById(mid);
+        if (cyNode && cyNode.length) cyNode.remove();
+        nodesRemoved++;
+      }
+      labelToId.set(canonicalLabel.toLowerCase(), canonicalId);
+      groupsApplied++;
+    }
+
+    if (groupsApplied > 0) _layout();
+    return { groupsApplied, nodesRemoved };
+  }
+
   function removeNode(nodeId) {
     if (!nodeId) return false;
     if (!state.nodes.has(nodeId)) return false;
@@ -380,5 +509,5 @@
     cy.resize();
   }
 
-  window.KGraph = { init, merge, clear, removeNode, exportJSON, size, onNodeClick, zoomBy, fit, resize };
+  window.KGraph = { init, merge, clear, removeNode, applyMergeGroups, exportJSON, size, onNodeClick, zoomBy, fit, resize };
 })();

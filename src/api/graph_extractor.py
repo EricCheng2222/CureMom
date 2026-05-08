@@ -308,6 +308,7 @@ def _parse_graph(raw: str) -> dict[str, Any]:
 def _build_nodes_from_relations(
     raw_relations: list[dict[str, Any]],
     ner_nodes: dict[str, GraphNode],
+    answer_text: str = "",
 ) -> tuple[list[GraphNode], dict[str, str]]:
     """Each unique subject/object string in `raw_relations` becomes a node.
 
@@ -316,20 +317,28 @@ def _build_nodes_from_relations(
     relations; if it doesn't, the duplicates show up as separate nodes
     — that's a cleaner failure than the previous two-list match.
 
-    Each node must ground in NER (label appears as a substring of, or
-    contains, some NER hit) — keeps the LLM from inventing concepts the
-    source text never mentioned. Vague single-word labels are dropped.
+    Grounding rule: a node is kept iff its label either
+      (a) overlaps with some NER hit (substring in either direction), OR
+      (b) appears as a substring of the answer text itself.
+    The answer text is the authoritative source — NER is just one
+    (incomplete) view of it. Without (b) we'd reject perfectly real
+    concepts the small NER model happened to miss (pathway names,
+    abbreviations, multi-token entities).
+    Vague single-word labels are still dropped.
     """
     ner_label_set = {n.label.lower() for n in ner_nodes.values()}
+    answer_lc = (answer_text or "").lower()
 
     def _grounded(label_lc: str) -> bool:
-        """True iff `label_lc` overlaps with at least one NER hit
-        (substring in either direction). One simple rule, applied uniformly."""
+        """Accept if label overlaps NER OR appears in the answer text."""
         if label_lc in ner_label_set:
             return True
         for nl in ner_label_set:
             if nl in label_lc or label_lc in nl:
                 return True
+        # Answer-text fallback. Keeps real concepts NER missed.
+        if answer_lc and label_lc in answer_lc:
+            return True
         return False
 
     # First pass: collect every unique subject/object the LLM mentioned.
@@ -522,10 +531,11 @@ def extract_graph(
     raw_dump = graph_obj.get("_raw", "") or ""
 
     # Each unique subject/object string in the relations becomes a node.
-    # No separate entities array, no aliases, no types — just whatever
-    # spelling the LLM used. Grounding (substring overlap with an NER
-    # hit) is the single mechanism that prevents hallucinated concepts.
-    canonical_nodes, label_to_id = _build_nodes_from_relations(raw_relations, ner_nodes)
+    # Grounding accepts the label if it appears in the NER set OR as a
+    # substring of the answer text — the answer is the authoritative source.
+    canonical_nodes, label_to_id = _build_nodes_from_relations(
+        raw_relations, ner_nodes, answer_text=answer,
+    )
 
     edges = _build_edges(raw_relations, label_to_id, citation_index_to_chunk_id)
 

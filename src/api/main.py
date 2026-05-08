@@ -33,6 +33,7 @@ from .classifier import classify_query
 from .citation_verifier import verify_citations, warnings_to_dicts
 from .drug_lookup import lookup_drugs_for_query
 from .graph_extractor import extract_graph
+from .graph_merger import dedup_entities
 from .llm_providers import get_provider
 from .response_builder import build_response, response_to_dict
 
@@ -155,6 +156,11 @@ class GraphExtractRequest(BaseModel):
     # "ollama/<model>", graph extraction uses that model so the answer
     # and the graph come from the same brain. Anything else falls back
     # to OLLAMA_GRAPH_MODEL / OLLAMA_MODEL env defaults.
+    llm_provider: str | None = None
+
+
+class GraphDedupRequest(BaseModel):
+    labels: list[str] = Field(default_factory=list, max_length=200)
     llm_provider: str | None = None
 
 
@@ -334,6 +340,25 @@ async def graph_extract(req: GraphExtractRequest) -> dict[str, Any]:
             detail=f"graph_extract failed: {type(exc).__name__}: {exc}",
         )
     return payload.to_dict()
+
+
+@app.post("/api/v1/graph_dedup")
+async def graph_dedup(req: GraphDedupRequest) -> dict[str, Any]:
+    """Dedup equivalent biomedical entity labels via the LLM.
+
+    Frontend sends the current node labels; we call the LLM to group
+    variants ("B-cell" / "B cell" / "B cells") and return the groupings.
+    The frontend then collapses each group into a single canonical node.
+    """
+    try:
+        groups = dedup_entities(req.labels, provider_spec=req.llm_provider)
+    except Exception as exc:
+        logger.exception("graph_dedup failed")
+        raise HTTPException(
+            status_code=502,
+            detail=f"graph_dedup failed: {type(exc).__name__}: {exc}",
+        )
+    return {"groups": [g.to_dict() for g in groups]}
 
 
 @app.get("/api/v1/papers/{pmid}")

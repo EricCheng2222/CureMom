@@ -982,6 +982,16 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); }
   color: var(--text);
   border-color: var(--border-strong);
 }
+.graph-action-btn[disabled] {
+  opacity: 0.55;
+  cursor: progress;
+  background: var(--surface);
+}
+.graph-action-btn[disabled]:hover {
+  background: var(--surface);
+  border-color: var(--border-2);
+  color: var(--text-3);
+}
 .graph-icon-btn {
   background: transparent;
   border: 1px solid var(--border-2);
