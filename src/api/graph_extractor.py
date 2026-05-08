@@ -273,14 +273,14 @@ _JSON_RE = re.compile(r"\{[\s\S]*\}")
 def _parse_graph(raw: str) -> dict[str, Any]:
     m = _JSON_RE.search(raw)
     if not m:
-        return {"entities": [], "relations": []}
+        return {"entities": [], "relations": [], "_raw": raw}
     try:
         obj = json.loads(m.group(0))
     except json.JSONDecodeError:
-        return {"entities": [], "relations": []}
+        return {"entities": [], "relations": [], "_raw": raw}
     ents = obj.get("entities") if isinstance(obj.get("entities"), list) else []
     rels = obj.get("relations") if isinstance(obj.get("relations"), list) else []
-    return {"entities": ents, "relations": rels}
+    return {"entities": ents, "relations": rels, "_raw": raw}
 
 
 # ─── Filter & assemble ───────────────────────────────────────────────────────
@@ -481,6 +481,22 @@ def extract_graph(
     raw_entities = graph_obj.get("entities", [])
     raw_relations = graph_obj.get("relations", [])
 
+    # Surface debug info when the LLM clearly underdelivered. Helps catch
+    # cases where the model returned `{"entities":[]}` or wrong field names.
+    underdelivered_msg: str | None = None
+    if not raw_entities and not raw_relations:
+        raw_dump = graph_obj.get("_raw", "") or ""
+        logger.warning(
+            "graph_extract: LLM produced no entities AND no relations. "
+            "NER had %d candidates. Raw LLM output (first 500 chars): %s",
+            len(ner_nodes), raw_dump[:500] if raw_dump else "(empty)",
+        )
+        underdelivered_msg = (
+            f"LLM returned empty entities/relations. "
+            f"NER candidates: {len(ner_nodes)}. "
+            f"Raw response head: {raw_dump[:200]}"
+        )
+
     # Build the canonical entity set the LLM picked. Each entity must
     # ground in NER (label or alias matches an NER hit), which prevents
     # the LLM from inventing concepts the source text never mentioned.
@@ -516,4 +532,6 @@ def extract_graph(
         len(raw_relations), len(edges),
     )
 
-    return GraphPayload(nodes=kept_nodes, edges=edges)
+    # Carry the underdelivered diagnostic forward to the frontend so it
+    # shows up in the browser console.
+    return GraphPayload(nodes=kept_nodes, edges=edges, error=underdelivered_msg)
