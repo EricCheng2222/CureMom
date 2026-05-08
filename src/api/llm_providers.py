@@ -84,16 +84,39 @@ class SynthesisResult:
     raw_response: str | None = None     # full LLM output before parsing
 
 
-def _build_context_block(chunks: list[RetrievedChunk]) -> str:
-    """Format retrieved chunks as numbered passages for the LLM context."""
+def _build_context_block(
+    chunks: list[RetrievedChunk],
+    drug_cards: list[str] | None = None,
+) -> str:
+    """Format retrieved chunks as numbered passages for the LLM context.
+
+    `drug_cards` is an optional list of pre-formatted drug-reference strings
+    (FDA labels / PubChem) that go in their own section above the literature.
+    These are authoritative — the LLM cites them by drug name, not [N].
+    """
     n = len(chunks)
-    lines: list[str] = [
-        f"You have exactly {n} passage{'s' if n != 1 else ''}, "
+    lines: list[str] = []
+
+    if drug_cards:
+        lines.append(
+            "AUTHORITATIVE DRUG REFERENCES (cite these by drug name, e.g. "
+            "\"the FDA label for atorvastatin states…\" — do NOT use [N] for these):"
+        )
+        lines.append("")
+        for card in drug_cards:
+            lines.append(card)
+            lines.append("")
+        lines.append("---")
+        lines.append("")
+
+    lines.append(
+        f"You have exactly {n} retrieved passage{'s' if n != 1 else ''}, "
         f"numbered [1] through [{n}]. "
         f"Do NOT cite any number outside this range — "
-        f"if you do, your answer will be rejected.",
-        "",
-    ]
+        f"if you do, your answer will be rejected."
+    )
+    lines.append("")
+
     for i, chunk in enumerate(chunks, start=1):
         author_year = f"{chunk.authors_short}, {chunk.pub_year}" if chunk.pub_year else chunk.authors_short
         source_line = f"[{i}] Source: {author_year}. {chunk.journal or ''}. PMID:{chunk.pmid}"
@@ -115,7 +138,11 @@ def _select_system_prompt(plain_language: bool) -> str:
 class LLMProvider(ABC):
     @abstractmethod
     def synthesize(
-        self, query: str, chunks: list[RetrievedChunk], plain_language: bool = False,
+        self,
+        query: str,
+        chunks: list[RetrievedChunk],
+        plain_language: bool = False,
+        drug_cards: list[str] | None = None,
     ) -> SynthesisResult:
         ...
 
@@ -133,7 +160,11 @@ class ExtractiveProvider(LLMProvider):
         return "extractive"
 
     def synthesize(
-        self, query: str, chunks: list[RetrievedChunk], plain_language: bool = False,
+        self,
+        query: str,
+        chunks: list[RetrievedChunk],
+        plain_language: bool = False,
+        drug_cards: list[str] | None = None,
     ) -> SynthesisResult:
         if not chunks:
             return SynthesisResult(
@@ -183,9 +214,13 @@ class OllamaProvider(LLMProvider):
         return f"ollama/{self._model}"
 
     def synthesize(
-        self, query: str, chunks: list[RetrievedChunk], plain_language: bool = False,
+        self,
+        query: str,
+        chunks: list[RetrievedChunk],
+        plain_language: bool = False,
+        drug_cards: list[str] | None = None,
     ) -> SynthesisResult:
-        context = _build_context_block(chunks)
+        context = _build_context_block(chunks, drug_cards=drug_cards)
         user_message = f"Context passages:\n\n{context}\n\nQuestion: {query}"
 
         payload = {
@@ -248,14 +283,18 @@ class ClaudeProvider(LLMProvider):
         return f"claude/{self._model}"
 
     def synthesize(
-        self, query: str, chunks: list[RetrievedChunk], plain_language: bool = False,
+        self,
+        query: str,
+        chunks: list[RetrievedChunk],
+        plain_language: bool = False,
+        drug_cards: list[str] | None = None,
     ) -> SynthesisResult:
         try:
             import anthropic
         except ImportError as exc:
             raise RuntimeError("Install anthropic package: pip install anthropic") from exc
 
-        context = _build_context_block(chunks)
+        context = _build_context_block(chunks, drug_cards=drug_cards)
         user_message = f"Context passages:\n\n{context}\n\nQuestion: {query}"
 
         client = anthropic.Anthropic(api_key=self._api_key)
@@ -297,14 +336,18 @@ class OpenAIProvider(LLMProvider):
         return f"openai/{self._model}"
 
     def synthesize(
-        self, query: str, chunks: list[RetrievedChunk], plain_language: bool = False,
+        self,
+        query: str,
+        chunks: list[RetrievedChunk],
+        plain_language: bool = False,
+        drug_cards: list[str] | None = None,
     ) -> SynthesisResult:
         try:
             import openai
         except ImportError as exc:
             raise RuntimeError("Install openai package: pip install openai") from exc
 
-        context = _build_context_block(chunks)
+        context = _build_context_block(chunks, drug_cards=drug_cards)
         user_message = f"Context passages:\n\n{context}\n\nQuestion: {query}"
 
         client = openai.OpenAI(api_key=self._api_key)

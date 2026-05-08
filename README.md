@@ -30,6 +30,7 @@ PubMed API                   ChEMBL API (no key required)
 - **Phase 2** ✅ live — section-aware chunking + PubMedBERT (768-dim) embeddings on **all 866K chunks** (abstract + intro/methods/results/discussion from 34,596 OA full-text papers), HuggingFace transformer NER (`d4data/biomedical-ner-all`) over **1.23M entities**, HNSW vector index built
 - **Phase 3** ✅ live — pluggable LLM with per-request model selection in the UI (Ollama dropdown auto-populated with installed models), patient-mode prompt with clickable follow-up suggestions, query-complexity classifier, citation verifier (catches hallucinated `[N]` indices and weakly-supported claims), `/llm/status` health endpoint
 - **Phase 4** ✅ live — HippoRAG Personalized PageRank over a **5.27M-edge entity graph** (built from MeSH descriptors merged with NER co-occurrences), SPLADE sparse-vector pipeline ready to encode
+- **Drug reference layer** ✅ live — **1,719 FDA drug labels** (openFDA) + Wikipedia fallback for older/discontinued drugs. When a query mentions a drug (NER-detected), the structured drug card is injected into the LLM context as authoritative reference alongside retrieved literature.
 
 **Default retrieval strategy:** `full` = BM25 + dense + HippoRAG PPR rerank.
 
@@ -237,7 +238,24 @@ because PPR surfaces chunks that *bridge* the query entities ("complement",
 "drug", "lupus", "nephritis") even if no single chunk mentions all four.
 Verified live: returns 5 relevant papers in ~2.3s on the 1M-edge filtered graph.
 
-### 11. (Phase 4 — optional) SPLADE sparse vectors
+### 11. (Recommended) Pull FDA drug labels into the lookup table
+
+OpenFDA's Drug Label API gives ~1.7K commonly-prescribed modern drugs with
+indications, mechanism of action, pharmacology, dosing, contraindications,
+warnings, and interactions. Wikipedia fills in older/discontinued drugs
+(e.g. mephenoxalone) that the FDA no longer hosts current SPLs for.
+
+```bash
+PYTHONPATH=. python scripts/fetch_fda_drugs.py --max-pages 50
+```
+
+After this populates `fda_drugs`, every query that mentions a drug (NER-
+detected) gets that drug's structured info prepended to the LLM context
+as authoritative reference data — separate from the citation-bearing
+literature passages. Verified on `mephenoxalone` (Wikipedia fallback) and
+`atorvastatin` (FDA path), both surface correctly in `metadata.drug_cards`.
+
+### 12. (Phase 4 — optional) SPLADE sparse vectors
 
 Learned sparse vectors that capture biomedical synonym expansion (e.g.
 "antimalarial" ↔ "hydroxychloroquine") natively in Elasticsearch. Requires

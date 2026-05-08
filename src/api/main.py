@@ -31,6 +31,7 @@ from ..search.hybrid_retriever import HybridRetriever
 from ..search.mesh_expander import MeSHExpander
 from .classifier import classify_query
 from .citation_verifier import verify_citations, warnings_to_dicts
+from .drug_lookup import lookup_drugs_for_query
 from .llm_providers import get_provider
 from .response_builder import build_response, response_to_dict
 
@@ -213,10 +214,28 @@ async def query(
             "metadata": {"retrieval_strategy": req.options.retrieval_strategy, "model_used": "none"},
         }
 
+    # Drug lookup — if the query mentions any known drug, fetch its FDA card
+    # (with PubChem fallback) and inject as authoritative context.
+    drug_cards: list[str] = []
+    drug_card_names: list[str] = []
+    try:
+        with psycopg.connect(DB_DSN) as drug_conn:
+            cards = lookup_drugs_for_query(drug_conn, req.query, max_drugs=3)
+            for c in cards:
+                drug_cards.append(c.to_text())
+                drug_card_names.append(f"{c.name} ({c.source})")
+        if drug_cards:
+            logger.info("Injected %d drug card(s): %s",
+                        len(drug_cards), ", ".join(drug_card_names))
+    except Exception as exc:
+        logger.warning("Drug lookup failed (%s); continuing without drug cards.", exc)
+
     try:
         provider = get_provider(req.options.llm_provider)
         synthesis = provider.synthesize(
-            req.query, chunks, plain_language=req.options.plain_language,
+            req.query, chunks,
+            plain_language=req.options.plain_language,
+            drug_cards=drug_cards or None,
         )
     except Exception as exc:
         logger.exception("LLM provider %r failed", req.options.llm_provider)
@@ -242,6 +261,8 @@ async def query(
     citation_warnings = verify_citations(synthesis.response_text, chunks)
     if citation_warnings:
         output["metadata"]["citation_warnings"] = warnings_to_dicts(citation_warnings)
+    if drug_card_names:
+        output["metadata"]["drug_cards"] = drug_card_names
     return output
 
 
