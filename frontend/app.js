@@ -264,14 +264,18 @@ async function _extractGraph(query, response, citations) {
     console.warn('[KGraph] skipped — no usable chunks (need {chunk_id, chunk.text})');
     return;
   }
-  console.log('[KGraph] POST /api/v1/graph_extract with', chunks.length, 'chunks');
+  // Reuse the same provider the user picked for QA so the answer and the
+  // graph come from the same brain (only when it's an Ollama model — for
+  // claude/openai/extractive the backend falls back to its env default).
+  const provider = document.getElementById('consumer-provider')?.value || null;
+  console.log('[KGraph] POST /api/v1/graph_extract with', chunks.length, 'chunks, provider:', provider);
 
   if (_isGraphPanelOpen()) _showGraphSpinner(true);
   try {
     const r = await fetch(`${API}/api/v1/graph_extract`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query, answer: cleanAnswer, chunks }),
+      body: JSON.stringify({ query, answer: cleanAnswer, chunks, llm_provider: provider }),
     });
     if (!r.ok) {
       console.warn('[KGraph] /graph_extract HTTP', r.status);

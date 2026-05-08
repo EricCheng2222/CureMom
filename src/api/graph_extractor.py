@@ -256,6 +256,7 @@ def _ollama_graph(
     query: str,
     answer: str,
     candidate_entities: list[str],
+    provider_spec: str | None = None,
     timeout_s: float | None = None,
 ) -> dict[str, Any]:
     """Call Ollama with format=json and return the parsed {entities, relations}.
@@ -271,7 +272,18 @@ def _ollama_graph(
       GRAPH_TIMEOUT_S       — request timeout (default 600s = 10 min)
     """
     base = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-    model = os.environ.get("OLLAMA_GRAPH_MODEL") or os.environ.get("OLLAMA_MODEL", "medgemma:4b")
+    # Resolution order:
+    #   1. provider_spec from the request (user's dropdown choice) if it
+    #      starts with "ollama/<model>" — keeps QA + graph extraction on the
+    #      same brain.
+    #   2. OLLAMA_GRAPH_MODEL env (lets ops pin a different model just for
+    #      graph extraction).
+    #   3. OLLAMA_MODEL env (configured default Ollama model).
+    #   4. medgemma:4b (last-resort fallback).
+    if provider_spec and provider_spec.startswith("ollama/"):
+        model = provider_spec.split("/", 1)[1]
+    else:
+        model = os.environ.get("OLLAMA_GRAPH_MODEL") or os.environ.get("OLLAMA_MODEL", "medgemma:4b")
     num_ctx = int(os.environ.get("GRAPH_NUM_CTX", "16384"))
     if timeout_s is None:
         timeout_s = float(os.environ.get("GRAPH_TIMEOUT_S", "600"))
@@ -538,6 +550,7 @@ def extract_graph(
     query: str,
     answer: str,
     chunks: list[dict[str, Any]],
+    provider_spec: str | None = None,
 ) -> GraphPayload:
     """Extract a per-turn knowledge-graph payload.
 
@@ -569,6 +582,7 @@ def extract_graph(
         graph_obj = _ollama_graph(
             query=query, answer=answer,
             candidate_entities=candidate_labels,
+            provider_spec=provider_spec,
         )
     except Exception as exc:
         msg = f"{type(exc).__name__}: {exc}"

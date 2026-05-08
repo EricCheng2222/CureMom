@@ -151,6 +151,11 @@ class GraphExtractRequest(BaseModel):
     query: str = Field(..., min_length=3, max_length=2000)
     answer: str = Field(..., min_length=1, max_length=20000)
     chunks: list[GraphChunkRef] = Field(default_factory=list, max_length=20)
+    # Same dropdown choice the user picked for QA. When given as
+    # "ollama/<model>", graph extraction uses that model so the answer
+    # and the graph come from the same brain. Anything else falls back
+    # to OLLAMA_GRAPH_MODEL / OLLAMA_MODEL env defaults.
+    llm_provider: str | None = None
 
 
 # ─── Endpoints ───────────────────────────────────────────────────────────────
@@ -320,7 +325,8 @@ async def graph_extract(req: GraphExtractRequest) -> dict[str, Any]:
     """
     chunk_dicts = [{"id": c.id, "text": c.text} for c in req.chunks]
     try:
-        payload = extract_graph(req.query, req.answer, chunk_dicts)
+        payload = extract_graph(req.query, req.answer, chunk_dicts,
+                                provider_spec=req.llm_provider)
     except Exception as exc:
         logger.exception("graph_extract failed")
         raise HTTPException(
