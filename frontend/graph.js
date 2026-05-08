@@ -33,11 +33,14 @@
 
   function init(container) {
     if (typeof cytoscape === 'undefined') {
-      console.error('[KGraph] cytoscape library not loaded');
+      console.error('[KGraph] cytoscape library NOT loaded — check that the CDN <script> in index.html resolved');
       return null;
     }
+    console.log('[KGraph] cytoscape lib version:', cytoscape.version || '(unknown)');
     if (typeof cytoscape.use === 'function' && typeof window.cytoscapeFcose !== 'undefined') {
-      try { cytoscape.use(window.cytoscapeFcose); } catch (e) { /* already registered */ }
+      try { cytoscape.use(window.cytoscapeFcose); console.log('[KGraph] fcose layout registered'); } catch (e) { console.log('[KGraph] fcose already registered'); }
+    } else {
+      console.warn('[KGraph] fcose layout NOT available — falling back to cose');
     }
 
     cy = cytoscape({
@@ -204,7 +207,11 @@
   }
 
   function merge(payload) {
-    if (!cy || !payload) return { addedNodes: [], addedEdges: [] };
+    if (!cy) {
+      console.warn('[KGraph] merge skipped — cy is null. init() may have failed.');
+      return { addedNodes: [], addedEdges: [] };
+    }
+    if (!payload) return { addedNodes: [], addedEdges: [] };
 
     const incomingNodes = Array.isArray(payload.nodes) ? payload.nodes : [];
     const incomingEdges = Array.isArray(payload.edges) ? payload.edges : [];

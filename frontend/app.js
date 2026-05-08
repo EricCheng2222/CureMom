@@ -173,13 +173,27 @@ function setupKnowledgeGraph() {
 
 function ensureGraphInit() {
   if (_graphInitialized) return;
-  if (typeof KGraph === 'undefined') return;
+  if (typeof KGraph === 'undefined') {
+    console.warn('[KGraph] init skipped: KGraph module not loaded yet');
+    return;
+  }
   const canvas = document.getElementById('graph-canvas');
-  if (!canvas) return;
-  KGraph.init(canvas);
+  if (!canvas) {
+    console.warn('[KGraph] init skipped: #graph-canvas element not in DOM');
+    return;
+  }
+  const rect = canvas.getBoundingClientRect();
+  console.log('[KGraph] init — canvas size at init:', rect.width, '×', rect.height);
+  const cy = KGraph.init(canvas);
+  if (!cy) {
+    console.error('[KGraph] init failed — KGraph.init returned null. Is cytoscape loaded?');
+    return;
+  }
   KGraph.onNodeClick(_onGraphNodeClick);
   _graphInitialized = true;
   _refreshGraphChrome();
+  // Force a resize after a microtask so any layout-pending dimensions resolve.
+  setTimeout(() => { try { KGraph.resize(); } catch (_) {} }, 30);
 }
 
 function toggleGraphPanel() {
@@ -234,16 +248,25 @@ function _cleanForGraph(text) {
 }
 
 async function _extractGraph(query, response, citations) {
-  if (!_isGraphPanelOpen()) return;       // Don't spend LLM tokens if user has hidden the panel
+  console.log('[KGraph] _extractGraph called — query:', query.slice(0, 60), '| panel open:', _isGraphPanelOpen());
+  // Always run — even if the panel is closed, the data accumulates so opening
+  // the panel later shows what was collected. Spinner is panel-only.
   ensureGraphInit();
   const cleanAnswer = _cleanForGraph(response);
-  if (!cleanAnswer || cleanAnswer.length < 10) return;
+  if (!cleanAnswer || cleanAnswer.length < 10) {
+    console.warn('[KGraph] skipped — answer too short after cleaning');
+    return;
+  }
   const chunks = (citations || [])
     .map(c => ({ id: c.chunk_id, text: c.chunk?.text || '' }))
     .filter(c => Number.isFinite(c.id) && c.text);
-  if (!chunks.length) return;
+  if (!chunks.length) {
+    console.warn('[KGraph] skipped — no usable chunks (need {chunk_id, chunk.text})');
+    return;
+  }
+  console.log('[KGraph] POST /api/v1/graph_extract with', chunks.length, 'chunks');
 
-  _showGraphSpinner(true);
+  if (_isGraphPanelOpen()) _showGraphSpinner(true);
   try {
     const r = await fetch(`${API}/api/v1/graph_extract`, {
       method: 'POST',
@@ -251,14 +274,26 @@ async function _extractGraph(query, response, citations) {
       body: JSON.stringify({ query, answer: cleanAnswer, chunks }),
     });
     if (!r.ok) {
-      console.warn('[graph_extract] returned', r.status);
+      console.warn('[KGraph] /graph_extract HTTP', r.status);
       return;
     }
     const payload = await r.json();
-    KGraph.merge(payload);
+    console.log('[KGraph] received payload:', (payload.nodes || []).length, 'nodes,', (payload.edges || []).length, 'edges');
+    if (!payload.nodes?.length && !payload.edges?.length) {
+      console.warn('[KGraph] empty payload — backend produced no connected entities for this answer');
+      return;
+    }
+    const result = KGraph.merge(payload);
+    console.log('[KGraph] merged —', result.addedNodes.length, 'new nodes,', result.addedEdges.length, 'new edges');
     _refreshGraphChrome();
+    // If the panel is collapsed but we have new content, gently nudge it open
+    // so the user sees the result.
+    if (!_isGraphPanelOpen() && (result.addedNodes.length || result.addedEdges.length)) {
+      console.log('[KGraph] auto-opening panel — first content arrived');
+      toggleGraphPanel();
+    }
   } catch (err) {
-    console.warn('[graph_extract] fetch failed:', err);
+    console.error('[KGraph] /graph_extract fetch failed:', err);
   } finally {
     _showGraphSpinner(false);
   }
