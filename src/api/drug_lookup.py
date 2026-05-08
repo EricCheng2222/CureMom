@@ -517,40 +517,72 @@ def lookup_drugs_for_query(
     max_drugs: int = 3,
     use_external_fallback: bool = True,
     use_reverse_lookup: bool = True,
+    use_llm_analysis: bool = True,
 ) -> list[DrugCard]:
     """Detect drug names in the query and return matching drug cards.
 
-    Pipeline:
-      1. Forward lookup — detect drug-name candidates and look up each.
-      2. If forward lookup returns nothing AND `use_reverse_lookup`, do a
-         reverse FTS search on indications/mechanism for queries like
-         "what drugs help muscle relaxation?"
-      3. External fallback (Wikipedia) for drug names missing from openFDA.
+    Pipeline (when LLM analysis is enabled — default):
+      1. Ask the LLM to classify the query intent + extract clean drug names
+         and canonical indication terms.
+      2. If intent="about_specific_drug" → forward lookup on each drug name.
+         If intent="find_drugs_by_effect" → reverse FTS on indication terms.
+         If intent="general" → no drug cards (literature retrieval is enough).
+      3. Wikipedia fallback only fires for forward-lookup misses.
+
+    When LLM analysis is disabled, falls back to the regex-based detection.
     """
     cards: list[DrugCard] = []
     seen: set[str] = set()
 
-    for name in candidate_drug_names(query):
-        if len(cards) >= max_drugs:
-            break
-        if name in seen:
-            continue
-        seen.add(name)
+    drug_names: list[str] = []
+    indication_terms: list[str] = []
+    intent = "general"
 
-        # Try the local DB first
-        card = lookup_in_db(conn, name)
-        if card is None and use_external_fallback:
-            card = lookup_wikipedia(name)
+    if use_llm_analysis:
+        try:
+            from .query_analyzer import analyze_query
+            analysis = analyze_query(query)
+            intent = analysis.intent
+            drug_names = analysis.drug_names
+            indication_terms = analysis.indication_terms
+            logger.info(
+                "Query analyzed: intent=%s drug_names=%s indication_terms=%s",
+                intent, drug_names, indication_terms,
+            )
+        except Exception as exc:
+            logger.warning("LLM analysis unavailable (%s); using regex.", exc)
+
+    # If LLM analysis didn't produce candidates, fall back to regex extraction
+    if not drug_names and intent != "find_drugs_by_effect":
+        drug_names = candidate_drug_names(query)
+
+    # Forward lookup (drug names)
+    if intent != "find_drugs_by_effect":
+        for name in drug_names:
+            if len(cards) >= max_drugs:
+                break
+            if name in seen:
+                continue
+            seen.add(name)
+            card = lookup_in_db(conn, name)
+            if card is None and use_external_fallback:
+                card = lookup_wikipedia(name)
+                if card is not None:
+                    try:
+                        cache_external_in_db(conn, card)
+                    except Exception as exc:
+                        logger.debug("Failed to cache wiki hit %r (%s)", name, exc)
             if card is not None:
-                try:
-                    cache_external_in_db(conn, card)
-                except Exception as exc:
-                    logger.debug("Failed to cache wiki hit %r (%s)", name, exc)
-        if card is not None:
-            cards.append(card)
+                cards.append(card)
 
-    # If no drug name was detected, try reverse lookup by indication text
-    if not cards and use_reverse_lookup:
-        cards = lookup_drugs_by_indication(conn, query, limit=max_drugs)
+    # Reverse lookup (indication terms)
+    if not cards and use_reverse_lookup and intent != "about_specific_drug":
+        if indication_terms:
+            # Use the LLM's canonical indication terms — much higher recall
+            expanded = " ".join(indication_terms)
+            cards = lookup_drugs_by_indication(conn, expanded, limit=max_drugs)
+        else:
+            # No LLM hint — fall back to using the raw query
+            cards = lookup_drugs_by_indication(conn, query, limit=max_drugs)
 
     return cards
