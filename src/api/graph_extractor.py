@@ -480,22 +480,7 @@ def extract_graph(
 
     raw_entities = graph_obj.get("entities", [])
     raw_relations = graph_obj.get("relations", [])
-
-    # Surface debug info when the LLM clearly underdelivered. Helps catch
-    # cases where the model returned `{"entities":[]}` or wrong field names.
-    underdelivered_msg: str | None = None
-    if not raw_entities and not raw_relations:
-        raw_dump = graph_obj.get("_raw", "") or ""
-        logger.warning(
-            "graph_extract: LLM produced no entities AND no relations. "
-            "NER had %d candidates. Raw LLM output (first 500 chars): %s",
-            len(ner_nodes), raw_dump[:500] if raw_dump else "(empty)",
-        )
-        underdelivered_msg = (
-            f"LLM returned empty entities/relations. "
-            f"NER candidates: {len(ner_nodes)}. "
-            f"Raw response head: {raw_dump[:200]}"
-        )
+    raw_dump = graph_obj.get("_raw", "") or ""
 
     # Build the canonical entity set the LLM picked. Each entity must
     # ground in NER (label or alias matches an NER hit), which prevents
@@ -526,12 +511,39 @@ def extract_graph(
     for n in kept_nodes:
         n.citations = node_citations.get(n.id, [])
 
-    logger.info(
-        "graph_extract: NER=%d candidates → LLM=%d entities (%d kept after filter), %d relations (%d kept edges)",
-        len(ner_nodes), len(canonical_nodes), len(kept_nodes),
-        len(raw_relations), len(edges),
+    stage_counts = (
+        f"NER={len(ner_nodes)} → "
+        f"LLM(raw_entities={len(raw_entities)}, raw_relations={len(raw_relations)}) → "
+        f"grounded_nodes={len(canonical_nodes)} → "
+        f"edges={len(edges)} → "
+        f"kept_nodes={len(kept_nodes)}"
     )
+    logger.info("graph_extract: %s", stage_counts)
 
-    # Carry the underdelivered diagnostic forward to the frontend so it
-    # shows up in the browser console.
-    return GraphPayload(nodes=kept_nodes, edges=edges, error=underdelivered_msg)
+    # If the final graph is empty, surface a diagnostic. We pinpoint WHICH
+    # stage dropped the work so the user can see the failure mode in the
+    # browser console without having to read server stdout.
+    diag: str | None = None
+    if not kept_nodes and not edges:
+        if not raw_entities and not raw_relations:
+            cause = "LLM returned empty entities AND relations"
+        elif not canonical_nodes:
+            cause = (
+                f"all {len(raw_entities)} LLM entities were rejected by grounding "
+                "(canonical label or alias didn't match any NER hit)"
+            )
+        elif not edges:
+            cause = (
+                f"all {len(raw_relations)} relations were rejected — likely "
+                "subject/object didn't match canonical entity labels"
+            )
+        else:
+            cause = "isolated-node filter dropped everything"
+        logger.warning("graph_extract: empty result — %s. Stage counts: %s. "
+                       "Raw LLM head: %s", cause, stage_counts, raw_dump[:500])
+        diag = (
+            f"{cause}. Stages: {stage_counts}. "
+            f"Raw LLM head: {raw_dump[:300]}"
+        )
+
+    return GraphPayload(nodes=kept_nodes, edges=edges, error=diag)
