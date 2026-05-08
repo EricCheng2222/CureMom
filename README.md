@@ -27,11 +27,13 @@ PubMed API                   ChEMBL API (no key required)
 
 **Phases (current state):**
 - **Phase 1** ✅ live — BM25 retrieval, extractive responses, no LLM required
-- **Phase 2** ✅ code complete; embedding run optional — section-aware chunking + PubMedBERT (768-dim, mean-pooled, MPS/CUDA/CPU auto), HuggingFace transformer NER (`d4data/biomedical-ner-all`)
-- **Phase 3** ✅ live — pluggable LLM (extractive / Ollama / Claude / OpenAI), query-complexity classifier, citation verifier (catches hallucinated `[N]` indices and weakly-supported claims), `/llm/status` health endpoint
-- **Phase 4** ✅ live — HippoRAG Personalized PageRank over a 5.27M-edge entity graph (built from MeSH descriptors merged with NER co-occurrences), SPLADE sparse-vector pipeline ready to encode
+- **Phase 2** ✅ live — section-aware chunking + PubMedBERT (768-dim) embeddings on **all 866K chunks** (abstract + intro/methods/results/discussion from 34,596 OA full-text papers), HuggingFace transformer NER (`d4data/biomedical-ner-all`) over **1.23M entities**, HNSW vector index built
+- **Phase 3** ✅ live — pluggable LLM with per-request model selection in the UI (Ollama dropdown auto-populated with installed models), patient-mode prompt with clickable follow-up suggestions, query-complexity classifier, citation verifier (catches hallucinated `[N]` indices and weakly-supported claims), `/llm/status` health endpoint
+- **Phase 4** ✅ live — HippoRAG Personalized PageRank over a **5.27M-edge entity graph** (built from MeSH descriptors merged with NER co-occurrences), SPLADE sparse-vector pipeline ready to encode
 
-**Default retrieval strategy:** `full` = BM25 + dense (when embeddings present) + HippoRAG PPR rerank.
+**Default retrieval strategy:** `full` = BM25 + dense + HippoRAG PPR rerank.
+
+**Default LLM provider:** `ollama/medgemma:4b` (medical-tuned 4B model, 32K context). Configurable via `OLLAMA_MODEL` env or per-request from the dropdown.
 
 ---
 
