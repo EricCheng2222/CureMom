@@ -154,102 +154,71 @@ def _gather_entities(
 
 # ─── LLM relation extraction ─────────────────────────────────────────────────
 
-_GRAPH_PROMPT = """You build a precise biomedical knowledge graph from a question and a synthesized answer.
+_GRAPH_PROMPT = """You extract a small biomedical knowledge graph from a question and a synthesized answer.
 
 The answer is a summary of research papers. Citation markers look like [1], [2], [3].
 
-Your job has TWO parts.
+Output ONLY directed relations between concepts mentioned in the answer. No prose, no markdown, no entity list — just relations. Each subject and object you write becomes a node automatically.
 
-═══════════════════════════════════════════════════════════════════════
-PART 1 — Pick GOOD entities. You will be given a noisy list of NER candidates plus the answer text. Mine BOTH for entities — the NER list is a hint, not a constraint, but every entity you emit must appear (in some surface form) somewhere in the answer or NER list.
+OUTPUT SHAPE:
 
-GOOD entities (always include if mentioned):
-  ✓ Named genes/proteins:        myostatin, IGF-1, METTL3, mTORC1, AKT, PI3K, klotho, TGF-beta
+{
+  "relations": [
+    {"subject":"<concept>", "predicate":"<verb phrase>", "object":"<concept>", "citations":[<ints>]}
+  ]
+}
+
+CONCEPTS (subjects/objects) — pick SPECIFIC, NAMED things mentioned in the answer:
+  ✓ Named genes/proteins:        myostatin, IGF-1, METTL3, mTORC1, klotho, TGF-beta
   ✓ Named pathways:              IGF/PI3K/AKT/mTORC1 pathway, JAK-STAT, NF-kB
-  ✓ Named cell types:            satellite cells, myoblasts, myofibers
+  ✓ Named cell types:            satellite cells, myoblasts, B cells, T cells
   ✓ Named drugs/compounds:       hydroxychloroquine, curcumin, leucine
-  ✓ Specific tissues:            skeletal muscle, lupus nephritis, dermis
-  ✓ Specific phenotypes/states:  muscle hypertrophy, muscle wasting, atrophy, anabolic state
-  ✓ Specific procedures:         resistance training, autophagy, protein synthesis
+  ✓ Specific tissues / organs:   skeletal muscle, lupus nephritis, dermis, liver
+  ✓ Specific phenotypes:         muscle hypertrophy, muscle wasting, anabolic state
 
-BAD entities (DROP THESE — never emit):
-  ✗ Generic single words:        "protein", "proteins", "RNA", "DNA", "cell", "cells", "gene"
-                                 "tissue", "molecular", "cellular", "modification"
-  ✗ Adjectives without a noun:   "physical", "chronic", "acute", "mechanical"
-  ✗ Verbs/actions without object: "growth", "wasting" alone (use "muscle growth", "muscle wasting")
-  ✗ Hypernyms when a hyponym exists:  drop "protein" if "myostatin" is also present;
-                                       drop "pathway" if "IGF/PI3K pathway" is present.
+AVOID generic single words as concepts: "protein", "RNA", "cell", "molecular", "modification" — use the specific named version instead ("myostatin" not "protein"; "skeletal muscle" not "muscle").
 
-For each entity emit:
-  - label:    SHORT specific canonical name (e.g. "skeletal muscle", not "muscle"; "myostatin", not "protein")
-  - type:     ONE of CHEMICAL, DISEASE, GENE_OR_GENE_PRODUCT, ANATOMY, SYMPTOM, PROCEDURE, CELL_TYPE, ORGANISM, OTHER
-  - aliases:  surface forms / abbreviations that should fold into this entity (e.g. ["GH"] for "growth hormone")
+Use the SAME spelling for the same concept everywhere. If you call something "B cell" in one relation, do not call it "B-cell" or "B cells" in another. Pick one form and stick with it.
 
-═══════════════════════════════════════════════════════════════════════
-PART 2 — Extract SPECIFIC directed relations. Each relation has subject, predicate, object, citations.
-
-PREDICATES MUST BE SPECIFIC. Use verbs the answer actually uses:
+PREDICATES — short verb phrases (1-3 words) the answer actually uses:
   ✓ activates, inhibits, promotes, stimulates, suppresses, regulates,
     phosphorylates, binds, produces, secretes, releases,
     treats, causes, reduces, reverses, induces, blocks,
     is downstream of, is upstream of, is part of
 
-NEVER use these vague predicates — the graph becomes meaningless:
+NEVER use these vague predicates — they make the graph meaningless:
   ✗ "is managed by"          ← MEANINGLESS
-  ✗ "is controlled by"       ← TOO VAGUE; use "is regulated by" or "is inhibited by"
+  ✗ "is controlled by"       ← VAGUE; prefer "is regulated by" / "is inhibited by"
   ✗ "involves"               ← MEANINGLESS
   ✗ "relates to"             ← MEANINGLESS
-  ✗ "is associated with"     ← only as last resort
-  ✗ "is increased by"        ← VAGUE; use "is stimulated by", "is promoted by"
+  ✗ "is associated with"     ← last resort only
+  ✗ "is increased by"        ← VAGUE; prefer "is stimulated by"
   ✗ "depends on"             ← VAGUE
 
 EMIT CHAINS, NOT STARS. If the answer says "A activates B which activates C", emit BOTH:
   {"subject":"A","predicate":"activates","object":"B"}
   {"subject":"B","predicate":"activates","object":"C"}
-NOT just one star edge from "A" to "C".
+NOT a single edge from A to C.
 
-Pathway rule: name the pathway as ONE entity ("IGF/PI3K/AKT/mTORC1 pathway"), then emit edges to/from it. Do NOT split it into separate "PI3K", "AKT", "mTORC1" entities unless the answer specifically describes the steps between them.
+Pathway rule: name a multi-step pathway as ONE concept ("IGF/PI3K/AKT/mTORC1 pathway"), then emit edges into and out of it. Don't split it into separate steps unless the answer describes them.
 
-═══════════════════════════════════════════════════════════════════════
-OUTPUT — exactly this JSON shape, no prose, no markdown:
+Citations: each relation may cite [N] indices nearest the supporting sentence; an empty array is allowed.
 
-{
-  "entities": [{"label":"...","type":"...","aliases":[...]}],
-  "relations": [{"subject":"...","predicate":"...","object":"...","citations":[<ints>]}]
-}
-
-Rules:
-  - Up to 25 entities and 25 relations. Quality > quantity.
-  - Every relation must have a SPECIFIC predicate (not from the BAD list).
-  - Subject/object should match an entity label (exact or substring overlap).
-  - Each relation may cite the [N] numbers nearest the supporting sentence; an empty array is allowed.
+Up to 25 relations. Quality > quantity.
 
 ═══════════════════════════════════════════════════════════════════════
-WORKED EXAMPLE (do not copy values, learn the shape):
+WORKED EXAMPLE (learn the shape, don't copy values):
 
-Answer: "Growth hormone (GH) stimulates the liver to produce IGF-1 [1], which activates the PI3K/AKT/mTOR pathway in skeletal muscle to promote hypertrophy [1,2]. Myostatin opposes this by inhibiting protein synthesis [3]."
-
-Candidates: ["growth hormone","GH","IGF-1","IGF","liver","PI3K","AKT","mTOR","muscle","skeletal muscle","hypertrophy","myostatin","protein synthesis","protein"]
+Answer: "Growth hormone stimulates the liver to produce IGF-1 [1], which activates the PI3K/AKT/mTOR pathway in skeletal muscle to promote hypertrophy [1,2]. Myostatin opposes this by inhibiting protein synthesis [3]."
 
 Output:
-{"entities":[
-  {"label":"growth hormone","type":"CHEMICAL","aliases":["GH"]},
-  {"label":"IGF-1","type":"GENE_OR_GENE_PRODUCT","aliases":["IGF"]},
-  {"label":"liver","type":"ANATOMY","aliases":[]},
-  {"label":"PI3K/AKT/mTOR pathway","type":"PROCEDURE","aliases":["PI3K","AKT","mTOR"]},
-  {"label":"skeletal muscle","type":"ANATOMY","aliases":["muscle"]},
-  {"label":"muscle hypertrophy","type":"SYMPTOM","aliases":["hypertrophy"]},
-  {"label":"myostatin","type":"GENE_OR_GENE_PRODUCT","aliases":[]},
-  {"label":"protein synthesis","type":"PROCEDURE","aliases":[]}
- ],
- "relations":[
+{"relations":[
   {"subject":"growth hormone","predicate":"stimulates","object":"liver","citations":[1]},
   {"subject":"liver","predicate":"produces","object":"IGF-1","citations":[1]},
   {"subject":"IGF-1","predicate":"activates","object":"PI3K/AKT/mTOR pathway","citations":[1,2]},
   {"subject":"PI3K/AKT/mTOR pathway","predicate":"promotes","object":"muscle hypertrophy","citations":[2]},
   {"subject":"myostatin","predicate":"inhibits","object":"protein synthesis","citations":[3]}
- ]
-}"""
+]}"""
 
 
 def _ollama_graph(
@@ -336,104 +305,64 @@ def _parse_graph(raw: str) -> dict[str, Any]:
 
 # ─── Filter & assemble ───────────────────────────────────────────────────────
 
-def _build_canonical_nodes(
-    raw_entities: list[dict[str, Any]],
+def _build_nodes_from_relations(
+    raw_relations: list[dict[str, Any]],
     ner_nodes: dict[str, GraphNode],
 ) -> tuple[list[GraphNode], dict[str, str]]:
-    """Build canonical GraphNodes from the LLM's `entities` output.
+    """Each unique subject/object string in `raw_relations` becomes a node.
 
-    Each LLM entity must ground in NER — the canonical label OR at least
-    one alias must (case-insensitively) match an existing NER label.
-    Citations from all matching NER hits are unioned into the canonical
-    node.
+    Dedup is purely by the LLM's chosen surface form (case-insensitive).
+    The LLM is instructed to use ONE spelling per concept across all
+    relations; if it doesn't, the duplicates show up as separate nodes
+    — that's a cleaner failure than the previous two-list match.
 
-    Returns (canonical_nodes, label_to_id_map) where label_to_id_map
-    keys are lowercase canonical labels AND aliases — used by edge
-    resolution to map LLM relation endpoints to node ids.
+    Each node must ground in NER (label appears as a substring of, or
+    contains, some NER hit) — keeps the LLM from inventing concepts the
+    source text never mentioned. Vague single-word labels are dropped.
     """
-    # Build NER label → GraphNode lookup (case-insensitive)
-    ner_by_label: dict[str, GraphNode] = {n.label.lower(): n for n in ner_nodes.values()}
-    ner_label_set = set(ner_by_label.keys())
+    ner_label_set = {n.label.lower() for n in ner_nodes.values()}
 
-    canonical: dict[str, GraphNode] = {}     # id -> GraphNode
-    label_to_id: dict[str, str] = {}         # lowercase label/alias -> canonical id
-
-    def _ground(text: str) -> list[str]:
-        """Find NER labels that match `text` directly OR via substring
-        overlap in either direction (case-insensitive). Used to ground a
-        canonical entity proposed by the LLM."""
-        t = text.lower()
-        if not t:
-            return []
-        if t in ner_label_set:
-            return [t]
-        # Substring overlap — covers cases like canonical "muscle growth"
-        # grounding via NER "muscle", or NER "skeletal muscle" matching a
-        # canonical "muscle" the LLM picked.
-        hits = []
+    def _grounded(label_lc: str) -> bool:
+        """True iff `label_lc` overlaps with at least one NER hit
+        (substring in either direction). One simple rule, applied uniformly."""
+        if label_lc in ner_label_set:
+            return True
         for nl in ner_label_set:
-            if nl in t or t in nl:
-                hits.append(nl)
-        return hits
+            if nl in label_lc or label_lc in nl:
+                return True
+        return False
 
-    for e in raw_entities:
-        if not isinstance(e, dict):
+    # First pass: collect every unique subject/object the LLM mentioned.
+    seen_labels: dict[str, str] = {}  # lowercase -> canonical label (first form seen)
+    for r in raw_relations:
+        if not isinstance(r, dict):
             continue
-        label = (e.get("label") or "").strip()
-        if not label:
+        for field in ("subject", "object"):
+            v = (r.get(field) or "").strip()
+            if not v:
+                continue
+            key = v.lower()
+            if key not in seen_labels:
+                seen_labels[key] = v
+
+    # Build nodes, applying grounding + vague-label filter.
+    canonical: dict[str, GraphNode] = {}     # id -> GraphNode
+    label_to_id: dict[str, str] = {}         # lowercase label -> canonical id
+
+    for label_lc, label in seen_labels.items():
+        if label_lc in _VAGUE_LABELS:
             continue
-        # Drop fragment-only generic terms ("molecular", "RNA", "protein"...)
-        # They carry no biological meaning as graph nodes and clutter the canvas.
-        if label.lower() in _VAGUE_LABELS:
+        if not _grounded(label_lc):
             continue
-        etype = e.get("type") or "OTHER"
-        if etype not in _KNOWN_TYPES:
-            etype = "OTHER"
-        aliases_raw = e.get("aliases") or []
-        aliases = [str(a).strip() for a in aliases_raw if isinstance(a, (str, int))]
-
-        # Grounding: canonical label or any alias must overlap with NER set.
-        candidates = [label] + aliases
-        matching_ner_labels: list[str] = []
-        for c in candidates:
-            for hit in _ground(c):
-                if hit not in matching_ner_labels:
-                    matching_ner_labels.append(hit)
-        if not matching_ner_labels:
-            continue   # ungrounded — drop
-
-        # Aggregate citations from all matching NER hits, plus accept the
-        # LLM's chosen type even if NER labelled it differently (LLM has
-        # more semantic context).
-        citations: list[int] = []
-        kb_id: str | None = None
-        seen_cites: set[int] = set()
-        for nlabel in matching_ner_labels:
-            nnode = ner_by_label[nlabel.lower()]
-            for c in nnode.citations:
-                if c not in seen_cites:
-                    citations.append(c)
-                    seen_cites.add(c)
-            if kb_id is None and nnode.kb_id:
-                kb_id = nnode.kb_id
-
-        nid = kb_id or _slugify(label)
+        nid = _slugify(label)
         if nid in canonical:
-            # Merge into existing
-            existing = canonical[nid]
-            seen_cites = set(existing.citations)
-            for c in citations:
-                if c not in seen_cites:
-                    existing.citations.append(c)
-            for alias in candidates:
-                label_to_id[alias.lower()] = nid
-        else:
-            canonical[nid] = GraphNode(
-                id=nid, label=label, type=etype,
-                citations=citations, kb_id=kb_id,
-            )
-            for alias in candidates:
-                label_to_id[alias.lower()] = nid
+            label_to_id[label_lc] = nid
+            continue
+        canonical[nid] = GraphNode(
+            id=nid, label=label, type="OTHER",
+            citations=[], kb_id=None,
+        )
+        label_to_id[label_lc] = nid
 
     return list(canonical.values()), label_to_id
 
@@ -589,43 +518,14 @@ def extract_graph(
         logger.warning("graph_extract: LLM call failed (%s); returning empty graph", msg)
         return GraphPayload(nodes=[], edges=[], error=msg)
 
-    raw_entities = graph_obj.get("entities", [])
     raw_relations = graph_obj.get("relations", [])
     raw_dump = graph_obj.get("_raw", "") or ""
 
-    # Salvage entities the LLM mentioned in relations but forgot to list in
-    # its `entities` array. Small models (gemma4:e4b in particular) often
-    # emit ~15 relations referencing concepts only ~4 of which made it into
-    # the entity list. Harvest those, treat each as a one-off canonical
-    # entity, and let normal grounding decide if they survive.
-    listed_labels = set()
-    for e in raw_entities:
-        if not isinstance(e, dict):
-            continue
-        listed_labels.add((e.get("label") or "").strip().lower())
-        for a in (e.get("aliases") or []):
-            if isinstance(a, str):
-                listed_labels.add(a.strip().lower())
-
-    for r in raw_relations:
-        if not isinstance(r, dict):
-            continue
-        for field in ("subject", "object"):
-            v = (r.get(field) or "").strip()
-            if not v:
-                continue
-            if v.lower() in listed_labels:
-                continue
-            # Inject as a minimal entity record. Type "OTHER" — the type
-            # only matters for color, and grounding will still require
-            # this label to match an NER hit.
-            raw_entities.append({"label": v, "type": "OTHER", "aliases": []})
-            listed_labels.add(v.lower())
-
-    # Build the canonical entity set the LLM picked. Each entity must
-    # ground in NER (label or alias matches an NER hit), which prevents
-    # the LLM from inventing concepts the source text never mentioned.
-    canonical_nodes, label_to_id = _build_canonical_nodes(raw_entities, ner_nodes)
+    # Each unique subject/object string in the relations becomes a node.
+    # No separate entities array, no aliases, no types — just whatever
+    # spelling the LLM used. Grounding (substring overlap with an NER
+    # hit) is the single mechanism that prevents hallucinated concepts.
+    canonical_nodes, label_to_id = _build_nodes_from_relations(raw_relations, ner_nodes)
 
     edges = _build_edges(raw_relations, label_to_id, citation_index_to_chunk_id)
 
@@ -653,32 +553,25 @@ def extract_graph(
 
     stage_counts = (
         f"NER={len(ner_nodes)} → "
-        f"LLM(raw_entities={len(raw_entities)}, raw_relations={len(raw_relations)}) → "
+        f"LLM(raw_relations={len(raw_relations)}) → "
         f"grounded_nodes={len(canonical_nodes)} → "
         f"edges={len(edges)} → "
         f"kept_nodes={len(kept_nodes)}"
     )
     logger.info("graph_extract: %s", stage_counts)
 
-    # If the final graph is empty, surface a diagnostic. We pinpoint WHICH
-    # stage dropped the work so the user can see the failure mode in the
-    # browser console without having to read server stdout.
     diag: str | None = None
     if not kept_nodes and not edges:
-        if not raw_entities and not raw_relations:
-            cause = "LLM returned empty entities AND relations"
+        if not raw_relations:
+            cause = "LLM returned no relations"
         elif not canonical_nodes:
             cause = (
-                f"all {len(raw_entities)} LLM entities were rejected by grounding "
-                "(canonical label or alias didn't match any NER hit)"
-            )
-        elif not edges:
-            cause = (
-                f"all {len(raw_relations)} relations were rejected — likely "
-                "subject/object didn't match canonical entity labels"
+                "every relation subject/object was rejected by grounding — "
+                "either NER missed all the named concepts or the LLM "
+                "invented entities not in the answer"
             )
         else:
-            cause = "isolated-node filter dropped everything"
+            cause = "edges built but nothing survived filtering"
         logger.warning("graph_extract: empty result — %s. Stage counts: %s. "
                        "Raw LLM head: %s", cause, stage_counts, raw_dump[:500])
         diag = (
