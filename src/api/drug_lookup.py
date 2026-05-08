@@ -153,9 +153,16 @@ def lookup_in_db(conn: psycopg.Connection, name: str) -> DrugCard | None:
 
     if not row:
         return None
+    # Recover the original source: openFDA-fetched rows have raw_json with
+    # the full FDA label and no top-level "source" key; cached fallbacks
+    # store {"source": "wikipedia"} (etc.) in raw_json.
+    raw = row.get("raw_json") or {}
+    source = raw.get("source") if isinstance(raw, dict) else None
+    if source not in ("wikipedia", "pubchem"):
+        source = "fda"
     return DrugCard(
         name=row["generic_name"],
-        source="fda",
+        source=source,
         indications=row.get("indications_and_usage"),
         mechanism=row.get("mechanism_of_action"),
         pharmacology=row.get("pharmacology"),

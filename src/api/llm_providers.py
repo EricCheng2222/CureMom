@@ -99,8 +99,19 @@ def _build_context_block(
 
     if drug_cards:
         lines.append(
-            "AUTHORITATIVE DRUG REFERENCES (cite these by drug name, e.g. "
-            "\"the FDA label for atorvastatin states…\" — do NOT use [N] for these):"
+            "DRUG REFERENCES (one or more cards below). Each card's first line "
+            "is formatted: 'DRUG REFERENCE — <NAME> (<SOURCE>)'. Cite by name "
+            "and source, e.g. 'the FDA label for atorvastatin states…' or "
+            "'per the Wikipedia entry on mephenoxalone…' — match the source "
+            "tag on the card. Do NOT use [N] markers for these references; "
+            "[N] is reserved for the literature passages below."
+        )
+        lines.append("")
+        lines.append(
+            "If a drug card lacks a specific field (e.g. no Mechanism listed), "
+            "say so plainly — don't paraphrase the indication line as if it "
+            "were a mechanism explanation. The retrieved literature passages "
+            "below may have more detail; pull from them if relevant."
         )
         lines.append("")
         for card in drug_cards:
