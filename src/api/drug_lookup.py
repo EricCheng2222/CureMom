@@ -38,10 +38,34 @@ WIKIPEDIA_EXTRACT = "https://en.wikipedia.org/w/api.php"
 # We trust the upstream NER pipeline to flag CHEMICAL / MEDICATION entities;
 # this regex is a safety net for drug names embedded in conversational queries.
 _WORD_RE = re.compile(r"\b[A-Za-z][A-Za-z\-]{3,}\b")
+
+# Words that the regex safety net should NEVER treat as a candidate drug name.
+# Includes common English, generic medical concepts, body parts, conditions —
+# anything where a Wikipedia "lookup" produces irrelevant noise.
 _STOP = {
-    "what","when","where","which","does","this","that","they","them","their",
-    "from","with","about","have","take","take","help","helps","need","best",
-    "lupus","muscle","growth","kidney","fatigue","pain","fever","headache",
+    # Conversational filler
+    "what","when","where","which","whose","who","whom","this","that","they","them","their","there",
+    "tell","show","find","list","know","want","need","need","wonder","help","helps","helping",
+    "best","good","great","most","more","less","kind","type","sort","example","examples",
+    "available","modern","common","approved","useful","effective",
+    # Question shells / quantifiers
+    "does","do","is","are","was","were","be","been","have","had","has","take","using","used","uses",
+    "about","with","without","from","over","under","into","through","between",
+    # Medical concept words (NOT drug names — keep these for the reverse lookup)
+    "drug","drugs","medication","medications","medicine","medicines","compound","compounds",
+    "treatment","treatments","therapy","therapies","therapies","cure","cures",
+    "agent","agents","class","classes","supplement","supplements",
+    "side","effect","effects","reaction","reactions","interaction","interactions",
+    # Generic medical / body-part / condition nouns
+    "muscle","muscles","muscular","skeletal","cardiac","kidney","kidneys","renal","liver","brain",
+    "growth","relaxation","relaxant","spasm","spasms","pain","ache","aches","fatigue",
+    "fever","headache","nausea","cough","rash","inflammation","disease","syndrome","condition",
+    "symptoms","symptom","cancer","diabetes","hypertension","cholesterol","blood","pressure",
+    "lupus","autoimmune","arthritis","rheumatoid","nephritis",
+    "anxiety","depression","insomnia","epilepsy","stroke","attack","disorder",
+    # Time / scope
+    "year","years","old","male","female","adult","child","children","patient","patients",
+    "fast","slow","quick","quickly",
 }
 
 
@@ -105,13 +129,26 @@ def candidate_drug_names(query: str) -> list[str]:
     except Exception as exc:
         logger.debug("NER unavailable for drug detection (%s); using regex.", exc)
 
-    # Regex safety net — single-word drug-name shapes
+    # Regex safety net — only fires for tokens that LOOK like drug names.
+    # Drug-shape suffixes are highly specific (penicilLIN, omepraZOLE, atorvaSTATIN…).
+    # Generic long English words are filtered out via _STOP.
+    drug_suffixes = (
+        "cillin","mycin","sporin","statin","prazole","sartan","olol","pril",
+        "tinib","ciclib","zumab","ximab","imab","ridine","oxetine","tropine",
+        "oxalone","carbamol","cyclobenzaprine","barbital","azepam","azolam",
+        "phylline","triptan","glitazone","gliflozin","semide","floxacin",
+    )
     for w in _WORD_RE.findall(query):
         wl = w.lower()
         if wl in _STOP:
             continue
-        # Drug names tend to have specific endings or be long.
-        if len(wl) >= 6 or wl.endswith(("zole","cillin","mycin","statin","prazole","oxalone")):
+        if wl.endswith(drug_suffixes):
+            candidates.add(wl)
+        # Long unusual tokens that aren't English stopwords also pass — but
+        # only if they're length >=8 (filters out general-purpose words like
+        # "muscles", "kidneys", "relaxation"). Real drug names are typically
+        # 8+ chars when not abbreviations.
+        elif len(wl) >= 8 and any(ch in wl for ch in "xyz") or len(wl) >= 10:
             candidates.add(wl)
 
     return sorted(candidates)
@@ -351,19 +388,144 @@ def cache_external_in_db(conn: psycopg.Connection, card: DrugCard) -> None:
 
 # ─── Top-level entry point ───────────────────────────────────────────────
 
+# Stopwords for the reverse-lookup query parser. Drops generic English filler
+# AND drug-question shell words ("drug", "medication", "treatment", etc.) so
+# the actual disease/effect terms drive FTS rank.
+_REVERSE_STOPWORDS = {
+    "what", "which", "when", "where", "how", "does", "do", "is", "are", "the",
+    "for", "with", "and", "or", "of", "to", "an", "from", "by", "in",
+    "tell", "me", "show", "list", "find", "good", "best", "most",
+    "drug", "drugs", "medication", "medications", "medicine", "medicines",
+    "treatment", "treatments", "therapy", "therapies", "compound", "compounds",
+    "agent", "agents", "approved", "fda", "rx",
+    "help", "helps", "treat", "treats", "used", "use", "useful",
+    "available", "common", "modern",
+}
+
+
+def _query_content_terms(query: str) -> list[str]:
+    """Extract content terms (>=3 chars, not stopwords) from a free-text query."""
+    return [
+        w for w in re.findall(r"[a-zA-Z][a-zA-Z\-]{2,}", query.lower())
+        if w not in _REVERSE_STOPWORDS
+    ]
+
+
+def lookup_drugs_by_indication(
+    conn: psycopg.Connection,
+    query: str,
+    limit: int = 3,
+    min_rank: float = 0.01,
+) -> list[DrugCard]:
+    """Find FDA drugs whose indication/mechanism text matches the query.
+
+    Ranking layers (combined into a single score):
+      • OR over content terms — recall layer
+      • ILIKE phrase match on the bigram (e.g. 'muscle relaxation') —
+        boosts drugs that mention the FULL phrase, not just one word
+      • Indications field weighted higher than pharmacology
+    """
+    terms = _query_content_terms(query)
+    if not terms:
+        return []
+
+    or_tsq = " | ".join(terms)
+    # Build phrase candidates: consecutive bigrams of content terms, plus
+    # common medical morpheme variants ("muscle relax" → muscle relaxation,
+    # muscle relaxant). Use ILIKE rather than tsvector for phrase boost so
+    # exact-phrase prose hits score high regardless of how Postgres lemmatizes.
+    bigrams = [
+        f"%{terms[i]}%{terms[i+1]}%"
+        for i in range(len(terms) - 1)
+    ]
+    # Also try truncated-stem variants for common pharmacology phrasing
+    stems = []
+    for i in range(len(terms) - 1):
+        a, b = terms[i], terms[i+1]
+        # "relaxation" / "relaxant" both share "relax" — match it
+        if len(b) > 5:
+            stems.append(f"%{a}%{b[:5]}%")
+    phrase_patterns = bigrams + stems
+
+    with conn.cursor(row_factory=dict_row) as cur:
+        try:
+            cur.execute(
+                """
+                WITH scored AS (
+                  SELECT generic_name, brand_names, indications_and_usage,
+                         mechanism_of_action, pharmacology, contraindications,
+                         warnings, dosage_and_administration, raw_json,
+                         ts_rank_cd(
+                           setweight(to_tsvector('english', coalesce(indications_and_usage,'')), 'A') ||
+                           setweight(to_tsvector('english', coalesce(mechanism_of_action,'')), 'B')   ||
+                           setweight(to_tsvector('english', coalesce(pharmacology,'')), 'C'),
+                           to_tsquery('english', %s)
+                         ) AS fts_rank,
+                         CASE WHEN %s::text[] IS NOT NULL AND EXISTS (
+                                SELECT 1 FROM unnest(%s::text[]) p
+                                WHERE LOWER(coalesce(indications_and_usage,'') || ' ' ||
+                                            coalesce(mechanism_of_action,'')) LIKE p
+                              )
+                              THEN 1.0 ELSE 0.0
+                         END AS phrase_hit
+                  FROM fda_drugs
+                  WHERE to_tsvector('english',
+                          coalesce(indications_and_usage,'') || ' ' ||
+                          coalesce(mechanism_of_action,'')   || ' ' ||
+                          coalesce(pharmacology,'')
+                        ) @@ to_tsquery('english', %s)
+                )
+                SELECT *, (fts_rank + phrase_hit * 5.0) AS rank
+                FROM scored
+                ORDER BY rank DESC
+                LIMIT %s
+                """,
+                (or_tsq, phrase_patterns, phrase_patterns, or_tsq, limit * 2),
+            )
+            rows = cur.fetchall()
+        except psycopg.errors.SyntaxError:
+            return []
+
+    cards: list[DrugCard] = []
+    for row in rows:
+        rank = float(row.get("rank") or 0)
+        if rank < min_rank:
+            continue
+        raw = row.get("raw_json") or {}
+        source = raw.get("source") if isinstance(raw, dict) else None
+        if source not in ("wikipedia", "pubchem"):
+            source = "fda"
+        cards.append(DrugCard(
+            name=row["generic_name"],
+            source=source,
+            indications=row.get("indications_and_usage"),
+            mechanism=row.get("mechanism_of_action"),
+            pharmacology=row.get("pharmacology"),
+            contraindications=row.get("contraindications"),
+            warnings=row.get("warnings"),
+            dosage=row.get("dosage_and_administration"),
+            brand_names=row.get("brand_names") or [],
+        ))
+        if len(cards) >= limit:
+            break
+    return cards
+
+
 def lookup_drugs_for_query(
     conn: psycopg.Connection,
     query: str,
     max_drugs: int = 3,
     use_external_fallback: bool = True,
+    use_reverse_lookup: bool = True,
 ) -> list[DrugCard]:
     """Detect drug names in the query and return matching drug cards.
 
-    Returns at most `max_drugs` cards. Lookup order:
-      1. local fda_drugs (openFDA labels — ~1.7K modern Rx drugs)
-      2. Wikipedia REST (older / discontinued / non-US drugs)
-
-    Wikipedia hits are persisted into fda_drugs so subsequent calls are local.
+    Pipeline:
+      1. Forward lookup — detect drug-name candidates and look up each.
+      2. If forward lookup returns nothing AND `use_reverse_lookup`, do a
+         reverse FTS search on indications/mechanism for queries like
+         "what drugs help muscle relaxation?"
+      3. External fallback (Wikipedia) for drug names missing from openFDA.
     """
     cards: list[DrugCard] = []
     seen: set[str] = set()
@@ -386,5 +548,9 @@ def lookup_drugs_for_query(
                     logger.debug("Failed to cache wiki hit %r (%s)", name, exc)
         if card is not None:
             cards.append(card)
+
+    # If no drug name was detected, try reverse lookup by indication text
+    if not cards and use_reverse_lookup:
+        cards = lookup_drugs_by_indication(conn, query, limit=max_drugs)
 
     return cards
