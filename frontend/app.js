@@ -279,8 +279,15 @@ async function _extractGraph(query, response, citations) {
     }
     const payload = await r.json();
     console.log('[KGraph] received payload:', (payload.nodes || []).length, 'nodes,', (payload.edges || []).length, 'edges');
+    if (payload.error) {
+      console.error('[KGraph] backend reported error:', payload.error);
+    }
     if (!payload.nodes?.length && !payload.edges?.length) {
-      console.warn('[KGraph] empty payload — backend produced no connected entities for this answer');
+      if (payload.error) {
+        console.warn('[KGraph] empty payload due to error above. Try a shorter question, or set OLLAMA_GRAPH_MODEL to a faster model.');
+      } else {
+        console.warn('[KGraph] empty payload — LLM produced no grounded entities/relations for this answer');
+      }
       return;
     }
     const result = KGraph.merge(payload);

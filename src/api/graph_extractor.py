@@ -55,9 +55,10 @@ class GraphEdge:
 class GraphPayload:
     nodes: list[GraphNode]
     edges: list[GraphEdge]
+    error: str | None = None    # Set when the LLM call failed; empty result + reason
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "nodes": [
                 {"id": n.id, "label": n.label, "type": n.type,
                  "citations": n.citations, "kb_id": n.kb_id}
@@ -69,6 +70,9 @@ class GraphPayload:
                 for e in self.edges
             ],
         }
+        if self.error:
+            out["error"] = self.error
+        return out
 
 
 # ─── Slug helper for stable node ids ─────────────────────────────────────────
@@ -218,28 +222,42 @@ def _ollama_graph(
     answer: str,
     candidate_entities: list[str],
     chunks: list[dict[str, Any]],
-    timeout_s: float = 60.0,
+    timeout_s: float | None = None,
 ) -> dict[str, Any]:
     """Call Ollama with format=json and return the parsed {entities, relations}.
 
     Single combined call: the LLM canonicalizes the noisy NER candidate list
     AND emits relations between the canonical entities. Mirrors the pattern
     in src/api/query_analyzer.py.
+
+    Generous defaults — small biomedical models can be slow on JSON-mode
+    structured output, but giving them context + time produces much better
+    graphs than forcing tight prompts. Tunable via env:
+      OLLAMA_GRAPH_MODEL    — override model (default = OLLAMA_MODEL)
+      GRAPH_NUM_CTX         — context tokens (default 65536)
+      GRAPH_TIMEOUT_S       — request timeout (default 360s = 6 min)
     """
     base = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
     model = os.environ.get("OLLAMA_GRAPH_MODEL") or os.environ.get("OLLAMA_MODEL", "medgemma:4b")
+    num_ctx = int(os.environ.get("GRAPH_NUM_CTX", "65536"))
+    if timeout_s is None:
+        timeout_s = float(os.environ.get("GRAPH_TIMEOUT_S", "360"))
 
     chunk_lines = []
-    for c in chunks[:6]:
+    for c in chunks[:8]:
         text = (c.get("text") or "").replace("\n", " ").strip()
-        if len(text) > 600:
-            text = text[:600] + "…"
+        if len(text) > 1000:
+            text = text[:1000] + "…"
         chunk_lines.append(f"[chunk_id={c['id']}] {text}")
+
+    # Sort candidates longest-first so multi-word entities (which the LLM
+    # should prefer as canonical labels) appear at the top of the list.
+    candidates_sorted = sorted(candidate_entities, key=lambda s: -len(s))[:60]
 
     user_msg = (
         f"Question: {query}\n\n"
-        f"Answer: {answer}\n\n"
-        f"NER candidate entities ({len(candidate_entities)}): {', '.join(candidate_entities)}\n\n"
+        f"Answer: {answer[:4000]}\n\n"
+        f"NER candidate entities ({len(candidates_sorted)}): {', '.join(candidates_sorted)}\n\n"
         "Evidence chunks:\n" + "\n".join(chunk_lines)
     )
 
@@ -251,9 +269,10 @@ def _ollama_graph(
         ],
         "stream": False,
         "format": "json",
-        "options": {"num_ctx": 8192, "temperature": 0.0},
+        "options": {"num_ctx": num_ctx, "temperature": 0.0},
     }
 
+    logger.info("graph_extract: calling Ollama (model=%s, num_ctx=%d, timeout=%.0fs)", model, num_ctx, timeout_s)
     with httpx.Client(timeout=timeout_s) as client:
         r = client.post(f"{base}/api/chat", json=payload)
         r.raise_for_status()
@@ -452,8 +471,9 @@ def extract_graph(
             chunks=chunks,
         )
     except Exception as exc:
-        logger.warning("graph_extract: LLM call failed (%s); returning empty graph", exc)
-        return GraphPayload(nodes=[], edges=[])
+        msg = f"{type(exc).__name__}: {exc}"
+        logger.warning("graph_extract: LLM call failed (%s); returning empty graph", msg)
+        return GraphPayload(nodes=[], edges=[], error=msg)
 
     raw_entities = graph_obj.get("entities", [])
     raw_relations = graph_obj.get("relations", [])
