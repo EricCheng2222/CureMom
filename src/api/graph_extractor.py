@@ -98,12 +98,16 @@ _KNOWN_TYPES = {
 def _gather_entities(
     query: str,
     answer: str,
-    chunks: list[dict[str, Any]],
 ) -> dict[str, GraphNode]:
-    """Run NER over the question, answer, and each chunk text.
+    """Run NER over the question and answer ONLY (not the chunks).
 
-    Returns a dict keyed by node id (slug or kb_id) so duplicates merge
-    naturally and citations accumulate per node.
+    The answer is already a synthesized summary of the chunks — running
+    NER over the chunks too just produces noise and slows things down.
+    Citations on nodes are populated later (server-side) by mapping LLM
+    citation indices back to chunk_ids.
+
+    Returns a dict keyed by node id (slug or kb_id) so duplicate spans
+    merge naturally.
     """
     # Lazy import — keeps module import cheap, mirrors hipporag.extract_query_entities.
     from ..search.hipporag import extract_query_entities  # noqa: F401  (warms model cache)
@@ -119,17 +123,12 @@ def _gather_entities(
 
     by_id: dict[str, GraphNode] = {}
 
-    def _add(text: str, source_chunk_id: int) -> None:
-        # paper_id/chunk_id are bookkeeping for the chunk pipeline; here we
-        # only need the spans. Pass 0 for paper_id; pass the actual chunk_id
-        # so we can attribute citations.
-        for ent in runner.extract(text, paper_id=0, chunk_id=source_chunk_id):
+    def _add(text: str) -> None:
+        for ent in runner.extract(text, paper_id=0, chunk_id=0):
             label = ent.entity_text.strip().rstrip(',.;:')
-            # Minimal pre-filter — only obvious junk that wastes LLM tokens:
-            # too short to mean anything, no alphabetic content, or ends in
-            # a punctuation dangler from a bad span boundary. Real
-            # canonicalization (folding "muscle" → "skeletal muscle",
-            # dropping vague terms) is delegated to the LLM downstream.
+            # Minimal pre-filter — only obvious junk that wastes LLM tokens.
+            # Canonicalization (folding "muscle" → "skeletal muscle", dropping
+            # vague terms) is delegated to the LLM downstream.
             if len(label) < 3:
                 continue
             if not any(ch.isalpha() for ch in label):
@@ -141,30 +140,24 @@ def _gather_entities(
             node = by_id.get(nid)
             if node is None:
                 by_id[nid] = GraphNode(
-                    id=nid, label=label, type=etype, kb_id=ent.kb_id,
-                    citations=[source_chunk_id] if source_chunk_id > 0 else [],
+                    id=nid, label=label, type=etype, kb_id=ent.kb_id, citations=[],
                 )
             else:
                 if len(label) > len(node.label):
                     node.label = label
-                if source_chunk_id > 0 and source_chunk_id not in node.citations:
-                    node.citations.append(source_chunk_id)
 
-    # 0 = "from query/answer, no specific chunk attribution"
-    _add(query, 0)
-    _add(answer, 0)
-    for c in chunks:
-        cid = int(c["id"])
-        text = c.get("text") or ""
-        if text:
-            _add(text, cid)
+    _add(query)
+    _add(answer)
 
     return by_id
 
 
 # ─── LLM relation extraction ─────────────────────────────────────────────────
 
-_GRAPH_PROMPT = """You build a small biomedical knowledge graph from a question, an answer, and supporting evidence chunks.
+_GRAPH_PROMPT = """You build a small biomedical knowledge graph from a question and a synthesized answer.
+
+The answer is a summary of research papers — it already contains the substance you need.
+Citation markers in the answer look like [1], [2], [3], etc.
 
 Your job has TWO parts:
 
@@ -173,46 +166,49 @@ You will be given a noisy list of NER-extracted entity candidates. Some are usef
 
 Produce a clean canonical entity list:
   - Pick a SHORT, specific canonical label for each real concept (e.g. "skeletal muscle", not "muscle").
-  - Fold duplicates and fragments under that canonical label as "aliases" (e.g. canonical "skeletal muscle" with aliases ["muscle", "muscles"]).
-  - DROP entities that are too vague to be a graph node ("life", "type", "physical", "mass", "training" alone, "diet" alone, generic adjectives).
+  - Fold duplicates and fragments under that canonical label as "aliases".
+  - DROP entities that are too vague ("life", "type", "physical", "mass", "training" alone, "diet" alone, generic adjectives).
   - DROP entities that don't appear (in some form) in the candidate list — do not invent.
   - Pick ONE type from: CHEMICAL, DISEASE, GENE_OR_GENE_PRODUCT, ANATOMY, SYMPTOM, PROCEDURE, CELL_TYPE, ORGANISM, OTHER.
 
 PART 2 — Extract directed relations between canonical entities.
-Look for every distinct mechanism stated in the answer or chunks. Each relation has a subject, a 1-3 word lowercase predicate (e.g. "stimulates", "inhibits", "treats", "causes", "activates", "regulates", "reduces", "promotes"), an object, and the chunk_ids that evidence it.
+Look for every distinct mechanism stated in the answer. Each relation has:
+  - subject:    a canonical entity label
+  - predicate:  a 1-3 word lowercase verb phrase (e.g. "stimulates", "inhibits", "treats", "causes", "activates", "regulates", "reduces", "promotes")
+  - object:     a canonical entity label
+  - citations:  the [N] numbers that appear in the answer near where this mechanism is stated
 
 Output ONLY this JSON shape (no prose, no markdown fences):
 
 {
   "entities": [
-    {"label": "<canonical label>", "type": "<TYPE>", "aliases": ["<surface form>", ...]},
-    ...
+    {"label": "<canonical label>", "type": "<TYPE>", "aliases": ["<surface form>", ...]}
   ],
   "relations": [
-    {"subject": "<canonical label>", "predicate": "<verb phrase>", "object": "<canonical label>", "evidence_chunk_ids": [<int>, ...]},
-    ...
+    {"subject": "<canonical label>", "predicate": "<verb phrase>", "object": "<canonical label>", "citations": [<int>, ...]}
   ]
 }
 
 Rules:
   - Subject/object in `relations` MUST exactly match a `label` in your `entities` list.
-  - Each relation MUST cite at least one chunk_id from the provided evidence chunks.
-  - Aim for COVERAGE — emit every distinct mechanism. Chains are good: if A activates B and B promotes C, emit both triples.
-  - Up to 25 entities and 18 relations. Skip vague or unsupported ones first.
+  - Each relation should cite at least one [N] from the answer if one is nearby; if no [N] is associated, emit an empty array — the relation will still be kept.
+  - Aim for COVERAGE — emit every distinct mechanism. Chains are good: if A activates B and B promotes C, emit both.
+  - Up to 25 entities and 18 relations.
 
 Example (illustrative, do not copy):
-Input candidates: ["muscle", "muscles", "skeletal muscle", "growth", "growth hormone", "GH", "IGF-1", "IGF", "liver", "life", "type"]
+Answer: "Growth hormone (GH) stimulates the liver to produce IGF-1 [1], which promotes skeletal muscle hypertrophy [1,2]."
+Candidates: ["growth hormone", "GH", "IGF-1", "IGF", "liver", "muscle", "skeletal muscle"]
 Output:
 {"entities":[
   {"label":"growth hormone","type":"CHEMICAL","aliases":["GH"]},
   {"label":"IGF-1","type":"GENE_OR_GENE_PRODUCT","aliases":["IGF"]},
   {"label":"liver","type":"ANATOMY","aliases":[]},
-  {"label":"skeletal muscle","type":"ANATOMY","aliases":["muscle","muscles"]}
+  {"label":"skeletal muscle","type":"ANATOMY","aliases":["muscle"]}
  ],
  "relations":[
-  {"subject":"growth hormone","predicate":"stimulates","object":"liver","evidence_chunk_ids":[101]},
-  {"subject":"liver","predicate":"produces","object":"IGF-1","evidence_chunk_ids":[101]},
-  {"subject":"IGF-1","predicate":"promotes","object":"skeletal muscle","evidence_chunk_ids":[101,102]}
+  {"subject":"growth hormone","predicate":"stimulates","object":"liver","citations":[1]},
+  {"subject":"liver","predicate":"produces","object":"IGF-1","citations":[1]},
+  {"subject":"IGF-1","predicate":"promotes","object":"skeletal muscle","citations":[1,2]}
  ]
 }"""
 
@@ -221,34 +217,25 @@ def _ollama_graph(
     query: str,
     answer: str,
     candidate_entities: list[str],
-    chunks: list[dict[str, Any]],
     timeout_s: float | None = None,
 ) -> dict[str, Any]:
     """Call Ollama with format=json and return the parsed {entities, relations}.
 
-    Single combined call: the LLM canonicalizes the noisy NER candidate list
-    AND emits relations between the canonical entities. Mirrors the pattern
-    in src/api/query_analyzer.py.
+    Sends only the question, answer, and NER candidate list — NO chunk text.
+    The answer already contains the synthesized substance + [N] citation
+    markers, which the LLM uses as evidence indices. This makes the prompt
+    much smaller and inference dramatically faster.
 
-    Generous defaults — small biomedical models can be slow on JSON-mode
-    structured output, but giving them context + time produces much better
-    graphs than forcing tight prompts. Tunable via env:
+    Tunable via env:
       OLLAMA_GRAPH_MODEL    — override model (default = OLLAMA_MODEL)
-      GRAPH_NUM_CTX         — context tokens (default 65536)
-      GRAPH_TIMEOUT_S       — request timeout (default 360s = 6 min)
+      GRAPH_NUM_CTX         — context tokens (default 16384)
+      GRAPH_TIMEOUT_S       — request timeout (default 180s = 3 min)
     """
     base = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
     model = os.environ.get("OLLAMA_GRAPH_MODEL") or os.environ.get("OLLAMA_MODEL", "medgemma:4b")
-    num_ctx = int(os.environ.get("GRAPH_NUM_CTX", "65536"))
+    num_ctx = int(os.environ.get("GRAPH_NUM_CTX", "16384"))
     if timeout_s is None:
-        timeout_s = float(os.environ.get("GRAPH_TIMEOUT_S", "360"))
-
-    chunk_lines = []
-    for c in chunks[:8]:
-        text = (c.get("text") or "").replace("\n", " ").strip()
-        if len(text) > 1000:
-            text = text[:1000] + "…"
-        chunk_lines.append(f"[chunk_id={c['id']}] {text}")
+        timeout_s = float(os.environ.get("GRAPH_TIMEOUT_S", "180"))
 
     # Sort candidates longest-first so multi-word entities (which the LLM
     # should prefer as canonical labels) appear at the top of the list.
@@ -256,9 +243,8 @@ def _ollama_graph(
 
     user_msg = (
         f"Question: {query}\n\n"
-        f"Answer: {answer[:4000]}\n\n"
-        f"NER candidate entities ({len(candidates_sorted)}): {', '.join(candidates_sorted)}\n\n"
-        "Evidence chunks:\n" + "\n".join(chunk_lines)
+        f"Answer (with [N] citation markers): {answer[:5000]}\n\n"
+        f"NER candidate entities ({len(candidates_sorted)}): {', '.join(candidates_sorted)}"
     )
 
     payload = {
@@ -377,14 +363,19 @@ def _build_canonical_nodes(
 def _build_edges(
     raw_relations: list[dict[str, Any]],
     label_to_id: dict[str, str],
-    valid_chunk_ids: set[int],
+    citation_index_to_chunk_id: dict[int, int],
 ) -> list[GraphEdge]:
     """Convert raw LLM triples into validated GraphEdge objects.
+
+    Each LLM relation may carry `citations: [<int>, ...]` which are 1-based
+    [N] indices from the answer text. We map these to chunk_ids via the
+    citations array passed by the frontend (order = citation_index - 1).
+    Relations with NO valid citations are still kept — the prompt allows
+    citing nothing if no [N] is nearby in the answer.
 
     Drops:
       * triples whose subject or object isn't in the canonical entity set
         (matched via label OR any alias, case-insensitively)
-      * triples with no supporting chunk_ids in the provided set
       * exact duplicates (same source|predicate|target)
     """
     edges: dict[str, GraphEdge] = {}
@@ -407,19 +398,27 @@ def _build_edges(
         if len(pred_words) > 3:
             pred = " ".join(pred_words[:3])
 
-        ev_raw = r.get("evidence_chunk_ids") or []
+        # Accept either the new `citations` field (1-based [N] indices) or
+        # the legacy `evidence_chunk_ids` field (raw chunk_ids), for
+        # forward-compat with prompts the LLM might still emit.
+        ev_raw = r.get("citations") or r.get("evidence_chunk_ids") or []
         if not isinstance(ev_raw, list):
-            continue
+            ev_raw = []
         evidence: list[int] = []
         for x in ev_raw:
             try:
-                cid = int(x)
+                idx = int(x)
             except (TypeError, ValueError):
                 continue
-            if cid in valid_chunk_ids:
-                evidence.append(cid)
-        if not evidence:
-            continue
+            # First try mapping as a [N] citation index
+            cid = citation_index_to_chunk_id.get(idx)
+            if cid is not None:
+                if cid not in evidence:
+                    evidence.append(cid)
+            else:
+                # Fallback: maybe the LLM emitted a raw chunk_id (legacy)
+                if idx in set(citation_index_to_chunk_id.values()) and idx not in evidence:
+                    evidence.append(idx)
 
         eid = f"{s_id}|{pred}|{o_id}"
         existing = edges.get(eid)
@@ -456,19 +455,23 @@ def extract_graph(
     if not query or not answer:
         return GraphPayload(nodes=[], edges=[])
 
-    ner_nodes = _gather_entities(query, answer, chunks)
+    ner_nodes = _gather_entities(query, answer)
     if not ner_nodes:
         logger.info("graph_extract: NER produced no entities; returning empty graph")
         return GraphPayload(nodes=[], edges=[])
 
     candidate_labels = sorted({n.label for n in ner_nodes.values()})
-    valid_chunk_ids = {int(c["id"]) for c in chunks if "id" in c}
+
+    # Map [N] citation index → chunk_id. The frontend sends `chunks` in the
+    # same order as the citation pills, so chunks[i] corresponds to [i+1].
+    citation_index_to_chunk_id: dict[int, int] = {
+        i + 1: int(c["id"]) for i, c in enumerate(chunks) if "id" in c
+    }
 
     try:
         graph_obj = _ollama_graph(
             query=query, answer=answer,
             candidate_entities=candidate_labels,
-            chunks=chunks,
         )
     except Exception as exc:
         msg = f"{type(exc).__name__}: {exc}"
@@ -483,7 +486,7 @@ def extract_graph(
     # the LLM from inventing concepts the source text never mentioned.
     canonical_nodes, label_to_id = _build_canonical_nodes(raw_entities, ner_nodes)
 
-    edges = _build_edges(raw_relations, label_to_id, valid_chunk_ids)
+    edges = _build_edges(raw_relations, label_to_id, citation_index_to_chunk_id)
 
     # Drop isolated nodes — only show entities that participate in some
     # mechanism. A solo node isn't useful in a knowledge graph.
@@ -492,6 +495,20 @@ def extract_graph(
         connected_ids.add(e.source)
         connected_ids.add(e.target)
     kept_nodes = [n for n in canonical_nodes if n.id in connected_ids]
+
+    # Derive each node's citations from the edges it participates in
+    # (we no longer track per-NER-mention chunk_ids — chunks aren't sent
+    # to the LLM at all).
+    node_citations: dict[str, list[int]] = {n.id: [] for n in kept_nodes}
+    for e in edges:
+        for nid in (e.source, e.target):
+            seen = set(node_citations.get(nid, []))
+            for c in e.citations:
+                if c not in seen:
+                    node_citations[nid].append(c)
+                    seen.add(c)
+    for n in kept_nodes:
+        n.citations = node_citations.get(n.id, [])
 
     logger.info(
         "graph_extract: NER=%d candidates → LLM=%d entities (%d kept after filter), %d relations (%d kept edges)",
