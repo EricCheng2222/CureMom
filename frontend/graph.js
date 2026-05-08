@@ -11,16 +11,29 @@
  * Storage: in-memory Maps. Resets on page reload.
  */
 (function () {
+  // Cytoscape can't resolve `var(--...)` in style values — it doesn't
+  // walk computed styles. Read each CSS variable once at module load
+  // and hand Cytoscape resolved hex strings. Fallbacks match the
+  // values declared in style.css so the graph still works if the
+  // stylesheet hasn't loaded yet.
+  function _readVar(name, fallback) {
+    try {
+      const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+      return v || fallback;
+    } catch (_) {
+      return fallback;
+    }
+  }
   const NODE_TYPE_COLORS = {
-    CHEMICAL:             'var(--node-chemical)',
-    DISEASE:              'var(--node-disease)',
-    GENE_OR_GENE_PRODUCT: 'var(--node-gene)',
-    ANATOMY:              'var(--node-anatomy)',
-    SYMPTOM:              'var(--node-symptom)',
-    PROCEDURE:            'var(--node-procedure)',
-    CELL_TYPE:            'var(--node-anatomy)',
-    ORGANISM:             'var(--node-default)',
-    OTHER:                'var(--node-default)',
+    CHEMICAL:             _readVar('--node-chemical', '#34D399'),
+    DISEASE:              _readVar('--node-disease',  '#F87171'),
+    GENE_OR_GENE_PRODUCT: _readVar('--node-gene',     '#818CF8'),
+    ANATOMY:              _readVar('--node-anatomy',  '#FBBF24'),
+    SYMPTOM:              _readVar('--node-symptom',  '#FB7185'),
+    PROCEDURE:            _readVar('--node-procedure','#A78BFA'),
+    CELL_TYPE:            _readVar('--node-anatomy',  '#FBBF24'),
+    ORGANISM:             _readVar('--node-default',  '#94A3B8'),
+    OTHER:                _readVar('--node-default',  '#94A3B8'),
   };
 
   const state = {
