@@ -8,6 +8,13 @@ function switchMode(mode) {
     const el = document.getElementById(`view-${v}`);
     if (el) el.classList.toggle('active', v === mode);
   });
+  // Cytoscape was likely initialized while the patient view was hidden
+  // (canvas had 0×0 dimensions). When the view becomes active, the canvas
+  // gains real dimensions but Cytoscape's internal viewport is still
+  // stuck at 0×0. Force a resize+fit so existing nodes render correctly.
+  if (mode === 'consumer' && typeof KGraph !== 'undefined' && _graphInitialized) {
+    setTimeout(() => { try { KGraph.resize(); KGraph.fit(); } catch (_) {} }, 60);
+  }
 }
 
 // ── Status check ────────────────────────────────────────────────────────────
@@ -119,8 +126,10 @@ function setupKnowledgeGraph() {
   if (startOpen) panel.classList.remove('collapsed');
   document.getElementById('graph-toggle-btn')?.classList.toggle('active', startOpen);
 
-  // Initialize Cytoscape lazily on first open OR right now if we're starting open.
-  if (startOpen) ensureGraphInit();
+  // Cytoscape init is purely lazy — happens on first _extractGraph call OR
+  // first manual toggle. Initializing here at script-load time would put
+  // Cytoscape inside a 0×0 canvas (the patient view hasn't been activated
+  // yet) and the layout breaks.
 
   // Wire action buttons
   document.getElementById('graph-clear-btn')?.addEventListener('click', () => {
