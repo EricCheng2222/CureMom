@@ -181,6 +181,14 @@
           <span class="graph-status" id="graph-status"></span>
         </div>
         <div class="graph-actions">
+          <button class="graph-icon-btn" id="graph-zoom-out-btn" title="Zoom out">−</button>
+          <button class="graph-icon-btn" id="graph-fit-btn" title="Fit to view">
+            <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
+              <path d="M2 5V2H5M11 5V2H8M2 8V11H5M11 8V11H8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+          </button>
+          <button class="graph-icon-btn" id="graph-zoom-in-btn" title="Zoom in">+</button>
+          <span class="graph-action-divider"></span>
           <button class="graph-action-btn" id="graph-clear-btn" title="Clear graph">Clear</button>
           <button class="graph-action-btn" id="graph-export-btn" title="Export JSON">Export</button>
         </div>
@@ -312,7 +320,7 @@
   </div>
 </div>
 
-<script src="graph.js?v=1"></script>
-<script src="app.js?v=4"></script>
+<script src="graph.js?v=3"></script>
+<script src="app.js?v=6"></script>
 </body>
 </html>

@@ -982,6 +982,34 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); }
   color: var(--text);
   border-color: var(--border-strong);
 }
+.graph-icon-btn {
+  background: transparent;
+  border: 1px solid var(--border-2);
+  color: var(--text-3);
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.graph-icon-btn:hover {
+  background: var(--surface-2);
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+.graph-action-divider {
+  display: inline-block;
+  width: 1px;
+  height: 18px;
+  margin: 0 4px;
+  background: var(--border-2);
+}
 
 .graph-canvas-wrap {
   flex: 1;

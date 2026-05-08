@@ -142,6 +142,24 @@ function setupKnowledgeGraph() {
     a.remove();
     URL.revokeObjectURL(url);
   });
+  document.getElementById('graph-zoom-in-btn')?.addEventListener('click', () => {
+    ensureGraphInit();
+    KGraph.zoomBy(1.25);
+  });
+  document.getElementById('graph-zoom-out-btn')?.addEventListener('click', () => {
+    ensureGraphInit();
+    KGraph.zoomBy(0.8);
+  });
+  document.getElementById('graph-fit-btn')?.addEventListener('click', () => {
+    ensureGraphInit();
+    KGraph.fit();
+  });
+
+  // When the panel is shown after being hidden, the canvas needs a resize.
+  // Also resize on window resize so labels don't get clipped.
+  window.addEventListener('resize', () => {
+    if (_graphInitialized && _isGraphPanelOpen()) KGraph.resize();
+  });
 }
 
 function ensureGraphInit() {

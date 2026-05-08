@@ -43,7 +43,15 @@
     cy = cytoscape({
       container: container,
       elements: [],
-      wheelSensitivity: 0.25,
+      // Pan + zoom are on by default; we make wheel zoom feel snappier and
+      // clamp the zoom range so users can't get lost.
+      wheelSensitivity: 0.4,
+      minZoom: 0.15,
+      maxZoom: 5.0,
+      userPanningEnabled: true,
+      userZoomingEnabled: true,
+      boxSelectionEnabled: false,
+      autoungrabify: false,            // user can drag individual nodes
       style: [
         {
           selector: 'node',
@@ -51,17 +59,19 @@
             'background-color': (ele) => NODE_TYPE_COLORS[ele.data('type')] || NODE_TYPE_COLORS.OTHER,
             'label':            'data(label)',
             'color':            '#F1F5F9',
-            'font-size':        '11px',
+            'font-size':        '9px',
             'font-weight':      '600',
             'text-valign':      'bottom',
             'text-halign':      'center',
-            'text-margin-y':    6,
+            'text-margin-y':    5,
             'text-outline-color': '#0A0E1A',
             'text-outline-width': 2,
-            'border-width':     2,
-            'border-color':     'rgba(255,255,255,.18)',
-            'width':            32,
-            'height':           32,
+            'text-wrap':        'wrap',
+            'text-max-width':   '90px',
+            'border-width':     1.5,
+            'border-color':     'rgba(255,255,255,.22)',
+            'width':            22,
+            'height':           22,
             'transition-property': 'border-color, border-width, background-color, width, height',
             'transition-duration': '180ms',
           },
@@ -70,9 +80,9 @@
           selector: 'node:selected',
           style: {
             'border-color': '#FFFFFF',
-            'border-width': 3,
-            'width':  40,
-            'height': 40,
+            'border-width': 2.5,
+            'width':  28,
+            'height': 28,
           },
         },
         {
@@ -90,19 +100,23 @@
           selector: 'edge',
           style: {
             'curve-style':       'bezier',
-            'width':             1.5,
-            'line-color':        'rgba(255,255,255,.18)',
+            'width':             1.4,
+            'line-color':        'rgba(255,255,255,.28)',
             'target-arrow-shape': 'triangle',
-            'target-arrow-color': 'rgba(255,255,255,.30)',
+            'target-arrow-color': 'rgba(255,255,255,.45)',
             'arrow-scale':       0.9,
             'label':             'data(predicate)',
-            'font-size':         '9px',
-            'color':             'rgba(255,255,255,.75)',
+            'font-size':         '8px',
+            'font-weight':       '600',
+            'color':             '#E2E8F0',
             'text-rotation':     'autorotate',
             'text-background-color': '#0A0E1A',
-            'text-background-opacity': 0.85,
-            'text-background-padding': '2px',
+            'text-background-opacity': 0.92,
+            'text-background-padding': '3px',
             'text-background-shape':   'roundrectangle',
+            'text-border-color': 'rgba(255,255,255,.12)',
+            'text-border-width': 1,
+            'text-border-opacity': 1,
             'text-margin-y':     -2,
             'transition-property':'line-color, width, target-arrow-color',
             'transition-duration':'180ms',
@@ -166,19 +180,26 @@
 
   function _layout() {
     if (!cy) return;
-    const useFcose = cy.elements().length > 0 && cy.extension && cy.extension('layout', 'fcose');
+    if (!cy.elements().length) return;
+    // Pick fcose if registered, otherwise fall back to built-in cose.
+    const fcoseAvailable = !!(window.cytoscapeFcose);
     cy.layout({
-      name: useFcose ? 'fcose' : 'cose',
+      name: fcoseAvailable ? 'fcose' : 'cose',
       animate: 'end',
-      animationDuration: 350,
+      animationDuration: 400,
       randomize: false,
-      nodeRepulsion: 6500,
-      idealEdgeLength: 90,
-      edgeElasticity: 0.45,
+      nodeRepulsion: 14000,         // bigger = more spread
+      idealEdgeLength: 130,         // bigger = longer edges, easier-to-read labels
+      edgeElasticity: 0.35,
       nestingFactor: 1.2,
-      gravity: 0.25,
+      gravity: 0.20,                // lower = less centripetal pull
+      gravityRange: 4.0,
+      numIter: 2500,
+      tile: true,
+      tilingPaddingVertical: 14,
+      tilingPaddingHorizontal: 14,
       fit: true,
-      padding: 30,
+      padding: 40,
     }).run();
   }
 
@@ -290,5 +311,22 @@
     if (typeof handler === 'function') nodeClickHandlers.push(handler);
   }
 
-  window.KGraph = { init, merge, clear, exportJSON, size, onNodeClick };
+  function zoomBy(factor) {
+    if (!cy) return;
+    const center = { x: cy.width() / 2, y: cy.height() / 2 };
+    const newZoom = Math.max(cy.minZoom(), Math.min(cy.maxZoom(), cy.zoom() * factor));
+    cy.zoom({ level: newZoom, renderedPosition: center });
+  }
+
+  function fit() {
+    if (!cy || !cy.elements().length) return;
+    cy.fit(undefined, 40);
+  }
+
+  function resize() {
+    if (!cy) return;
+    cy.resize();
+  }
+
+  window.KGraph = { init, merge, clear, exportJSON, size, onNodeClick, zoomBy, fit, resize };
 })();

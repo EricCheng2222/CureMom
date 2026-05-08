@@ -205,6 +205,54 @@ TOPICS: list[IngestionTopic] = [
         description="All resistance training literature — mechanisms, adaptations, outcomes, any population",
         priority=2,
     ),
+
+    # ── Ichthyosis (genetic skin barrier disorders) ─────────────────────────
+    # Heterogeneous group of inherited cornification disorders. Worth keeping
+    # broad — there are many subtypes (lamellar, harlequin, X-linked, EHK, etc.)
+    # each with its own genetics and management literature.
+
+    IngestionTopic(
+        name="ichthyosis_core",
+        mesh_query='"Ichthyosis"[MeSH]',
+        description="Ichthyosis — broad MeSH term covering inherited cornification disorders",
+        priority=1,
+    ),
+    IngestionTopic(
+        name="ichthyosis_lamellar",
+        mesh_query='"Ichthyosis, Lamellar"[MeSH]',
+        description="Lamellar ichthyosis — TGM1 and related autosomal recessive forms",
+        priority=1,
+    ),
+    IngestionTopic(
+        name="ichthyosis_x_linked",
+        mesh_query='"Ichthyosis, X-Linked"[MeSH]',
+        description="X-linked ichthyosis — STS deficiency, steroid sulfatase",
+        priority=1,
+    ),
+    IngestionTopic(
+        name="ichthyosis_harlequin",
+        mesh_query='"Hyperkeratosis, Epidermolytic"[MeSH] OR "harlequin ichthyosis"[Title/Abstract] OR "ABCA12"[Title/Abstract]',
+        description="Severe forms — harlequin and epidermolytic hyperkeratosis (ABCA12, KRT1/KRT10)",
+        priority=2,
+    ),
+    IngestionTopic(
+        name="ichthyosis_genetics",
+        mesh_query='"Ichthyosis"[MeSH] AND ("Genetics"[Subheading] OR "genetics"[MeSH Subheading])',
+        description="Genetic basis of ichthyosis — gene panels, inheritance, molecular diagnostics",
+        priority=1,
+    ),
+    IngestionTopic(
+        name="ichthyosis_treatment",
+        mesh_query='"Ichthyosis"[MeSH] AND ("therapy"[Subheading] OR "drug therapy"[Subheading] OR "Randomized Controlled Trial"[Publication Type] OR "Clinical Trial"[Publication Type])',
+        description="Ichthyosis treatments — retinoids, emollients, gene therapy, clinical trials",
+        priority=1,
+    ),
+    IngestionTopic(
+        name="skin_barrier_function",
+        mesh_query='("Filaggrin Proteins"[MeSH] OR "Loricrin"[Title/Abstract] OR "Transglutaminases"[MeSH] OR "Stratum Corneum"[Title/Abstract]) AND ("skin"[MeSH] OR "epidermis"[MeSH])',
+        description="Skin-barrier biology — filaggrin, loricrin, transglutaminase, stratum corneum (mechanism layer for ichthyosis)",
+        priority=2,
+    ),
 ]
 
 
