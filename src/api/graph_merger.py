@@ -87,28 +87,53 @@ def dedup_entities(
 ) -> list[MergeGroup]:
     """Ask the LLM to group equivalent biomedical entity labels.
 
-    Returns a list of MergeGroup objects (each with ≥2 members). Groups
-    whose members aren't all in the input list are dropped (no
-    invented labels). Singletons are never returned.
+    Routes to the same provider the user picked in the dropdown:
+      ollama/<model> → Ollama JSON mode
+      claude         → Anthropic Messages API
+      openai         → OpenAI chat completions (json_object mode)
+      else / extractive → falls back to Ollama default
 
-    Tunable via env (same as graph_extractor):
-      OLLAMA_GRAPH_MODEL    — override model
-      GRAPH_NUM_CTX         — context tokens (default 16384)
-      GRAPH_TIMEOUT_S       — request timeout (default 600s = 10 min)
+    Returns a list of MergeGroup (each with ≥2 members). Groups whose
+    members aren't all in the input list are dropped (no invented
+    labels). Singletons are never returned.
     """
     if len(labels) < 2:
         return []
+    if timeout_s is None:
+        timeout_s = float(os.environ.get("GRAPH_TIMEOUT_S", "600"))
 
+    user_msg = f"Labels ({len(labels)}):\n" + "\n".join(f"- {lbl}" for lbl in labels)
+    target = _resolve_provider(provider_spec)
+
+    if target == "claude":
+        raw = _claude_dedup(user_msg, timeout_s)
+    elif target == "openai":
+        raw = _openai_dedup(user_msg, timeout_s)
+    else:
+        raw = _ollama_dedup(user_msg, provider_spec, timeout_s)
+
+    return _parse_groups(raw, allowed=set(labels))
+
+
+def _resolve_provider(provider_spec: str | None) -> str:
+    if not provider_spec:
+        return "ollama"
+    if provider_spec.startswith("ollama/") or provider_spec == "ollama":
+        return "ollama"
+    if provider_spec == "claude":
+        return "claude"
+    if provider_spec == "openai":
+        return "openai"
+    return "ollama"
+
+
+def _ollama_dedup(user_msg: str, provider_spec: str | None, timeout_s: float) -> str:
     base = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
     if provider_spec and provider_spec.startswith("ollama/"):
         model = provider_spec.split("/", 1)[1]
     else:
         model = os.environ.get("OLLAMA_GRAPH_MODEL") or os.environ.get("OLLAMA_MODEL", "medgemma:4b")
     num_ctx = int(os.environ.get("GRAPH_NUM_CTX", "16384"))
-    if timeout_s is None:
-        timeout_s = float(os.environ.get("GRAPH_TIMEOUT_S", "600"))
-
-    user_msg = f"Labels ({len(labels)}):\n" + "\n".join(f"- {lbl}" for lbl in labels)
 
     payload = {
         "model": model,
@@ -121,14 +146,52 @@ def dedup_entities(
         "options": {"num_ctx": num_ctx, "temperature": 0.0},
     }
 
-    logger.info("graph_dedup: calling Ollama (model=%s, num_ctx=%d, timeout=%.0fs, %d labels)",
-                model, num_ctx, timeout_s, len(labels))
+    logger.info("graph_dedup: calling Ollama (model=%s, timeout=%.0fs)", model, timeout_s)
     with httpx.Client(timeout=timeout_s) as client:
         r = client.post(f"{base}/api/chat", json=payload)
         r.raise_for_status()
-        raw = r.json()["message"]["content"]
+        return r.json()["message"]["content"]
 
-    return _parse_groups(raw, allowed=set(labels))
+
+def _claude_dedup(user_msg: str, timeout_s: float) -> str:
+    import anthropic
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if not api_key or api_key == "your_anthropic_api_key_here":
+        raise RuntimeError("ANTHROPIC_API_KEY not set in env")
+    model = os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
+
+    logger.info("graph_dedup: calling Claude (model=%s, timeout=%.0fs)", model, timeout_s)
+    client = anthropic.Anthropic(api_key=api_key, timeout=timeout_s)
+    msg = client.messages.create(
+        model=model,
+        max_tokens=2048,
+        system=_DEDUP_PROMPT,
+        messages=[{"role": "user", "content": user_msg}],
+    )
+    return msg.content[0].text if msg.content else ""
+
+
+def _openai_dedup(user_msg: str, timeout_s: float) -> str:
+    import openai
+
+    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if not api_key or api_key == "your_openai_api_key_here":
+        raise RuntimeError("OPENAI_API_KEY not set in env")
+    model = os.environ.get("OPENAI_MODEL", "gpt-4o")
+
+    logger.info("graph_dedup: calling OpenAI (model=%s, timeout=%.0fs)", model, timeout_s)
+    client = openai.OpenAI(api_key=api_key, timeout=timeout_s)
+    resp = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": _DEDUP_PROMPT},
+            {"role": "user", "content": user_msg},
+        ],
+        response_format={"type": "json_object"},
+        temperature=0.0,
+    )
+    return resp.choices[0].message.content or ""
 
 
 def _parse_groups(raw: str, allowed: set[str]) -> list[MergeGroup]:

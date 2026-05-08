@@ -221,51 +221,67 @@ Output:
 ]}"""
 
 
-def _ollama_graph(
+def _build_user_message(query: str, answer: str, candidate_entities: list[str]) -> str:
+    candidates_sorted = sorted(candidate_entities, key=lambda s: -len(s))[:60]
+    return (
+        f"Question: {query}\n\n"
+        f"Answer (with [N] citation markers): {answer[:5000]}\n\n"
+        f"NER candidate entities ({len(candidates_sorted)}): {', '.join(candidates_sorted)}"
+    )
+
+
+def _resolve_provider(provider_spec: str | None) -> str:
+    """Decide which provider to actually call based on the dropdown.
+
+    Returns "ollama", "claude", "openai", or "ollama" as the safe default
+    for "extractive" / unknown.
+    """
+    if not provider_spec:
+        return "ollama"
+    if provider_spec.startswith("ollama/") or provider_spec == "ollama":
+        return "ollama"
+    if provider_spec == "claude":
+        return "claude"
+    if provider_spec == "openai":
+        return "openai"
+    return "ollama"
+
+
+def _llm_graph(
     query: str,
     answer: str,
     candidate_entities: list[str],
     provider_spec: str | None = None,
     timeout_s: float | None = None,
 ) -> dict[str, Any]:
-    """Call Ollama with format=json and return the parsed {entities, relations}.
+    """Dispatch the graph-extract LLM call to whichever provider the user
+    picked in the dropdown. Returns the parsed {entities, relations}.
 
-    Sends only the question, answer, and NER candidate list — NO chunk text.
-    The answer already contains the synthesized substance + [N] citation
-    markers, which the LLM uses as evidence indices. This makes the prompt
-    much smaller and inference dramatically faster.
-
-    Tunable via env:
+    Tunable via env (Ollama path):
       OLLAMA_GRAPH_MODEL    — override model (default = OLLAMA_MODEL)
       GRAPH_NUM_CTX         — context tokens (default 16384)
       GRAPH_TIMEOUT_S       — request timeout (default 600s = 10 min)
     """
+    if timeout_s is None:
+        timeout_s = float(os.environ.get("GRAPH_TIMEOUT_S", "600"))
+
+    user_msg = _build_user_message(query, answer, candidate_entities)
+    target = _resolve_provider(provider_spec)
+
+    if target == "claude":
+        return _claude_graph(user_msg, timeout_s)
+    if target == "openai":
+        return _openai_graph(user_msg, timeout_s)
+    return _ollama_graph(user_msg, provider_spec, timeout_s)
+
+
+def _ollama_graph(user_msg: str, provider_spec: str | None, timeout_s: float) -> dict[str, Any]:
     base = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-    # Resolution order:
-    #   1. provider_spec from the request (user's dropdown choice) if it
-    #      starts with "ollama/<model>" — keeps QA + graph extraction on the
-    #      same brain.
-    #   2. OLLAMA_GRAPH_MODEL env (lets ops pin a different model just for
-    #      graph extraction).
-    #   3. OLLAMA_MODEL env (configured default Ollama model).
-    #   4. medgemma:4b (last-resort fallback).
     if provider_spec and provider_spec.startswith("ollama/"):
         model = provider_spec.split("/", 1)[1]
     else:
         model = os.environ.get("OLLAMA_GRAPH_MODEL") or os.environ.get("OLLAMA_MODEL", "medgemma:4b")
     num_ctx = int(os.environ.get("GRAPH_NUM_CTX", "16384"))
-    if timeout_s is None:
-        timeout_s = float(os.environ.get("GRAPH_TIMEOUT_S", "600"))
-
-    # Sort candidates longest-first so multi-word entities (which the LLM
-    # should prefer as canonical labels) appear at the top of the list.
-    candidates_sorted = sorted(candidate_entities, key=lambda s: -len(s))[:60]
-
-    user_msg = (
-        f"Question: {query}\n\n"
-        f"Answer (with [N] citation markers): {answer[:5000]}\n\n"
-        f"NER candidate entities ({len(candidates_sorted)}): {', '.join(candidates_sorted)}"
-    )
 
     payload = {
         "model": model,
@@ -283,7 +299,53 @@ def _ollama_graph(
         r = client.post(f"{base}/api/chat", json=payload)
         r.raise_for_status()
         raw = r.json()["message"]["content"]
+    return _parse_graph(raw)
 
+
+def _claude_graph(user_msg: str, timeout_s: float) -> dict[str, Any]:
+    """Call Anthropic's Messages API directly. Anthropic doesn't have a
+    strict format=json mode like Ollama, but Haiku reliably returns clean
+    JSON when the system prompt instructs it to."""
+    import anthropic
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if not api_key or api_key == "your_anthropic_api_key_here":
+        raise RuntimeError("ANTHROPIC_API_KEY not set in env")
+    model = os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
+
+    logger.info("graph_extract: calling Claude (model=%s, timeout=%.0fs)", model, timeout_s)
+    client = anthropic.Anthropic(api_key=api_key, timeout=timeout_s)
+    msg = client.messages.create(
+        model=model,
+        max_tokens=4096,
+        system=_GRAPH_PROMPT,
+        messages=[{"role": "user", "content": user_msg}],
+    )
+    raw = msg.content[0].text if msg.content else ""
+    return _parse_graph(raw)
+
+
+def _openai_graph(user_msg: str, timeout_s: float) -> dict[str, Any]:
+    """Call OpenAI's chat completions with response_format=json_object."""
+    import openai
+
+    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if not api_key or api_key == "your_openai_api_key_here":
+        raise RuntimeError("OPENAI_API_KEY not set in env")
+    model = os.environ.get("OPENAI_MODEL", "gpt-4o")
+
+    logger.info("graph_extract: calling OpenAI (model=%s, timeout=%.0fs)", model, timeout_s)
+    client = openai.OpenAI(api_key=api_key, timeout=timeout_s)
+    resp = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": _GRAPH_PROMPT},
+            {"role": "user", "content": user_msg},
+        ],
+        response_format={"type": "json_object"},
+        temperature=0.0,
+    )
+    raw = resp.choices[0].message.content or ""
     return _parse_graph(raw)
 
 
@@ -517,7 +579,7 @@ def extract_graph(
     }
 
     try:
-        graph_obj = _ollama_graph(
+        graph_obj = _llm_graph(
             query=query, answer=answer,
             candidate_entities=candidate_labels,
             provider_spec=provider_spec,
