@@ -146,6 +146,47 @@ def _select_system_prompt(plain_language: bool) -> str:
     return PATIENT_SYSTEM_PROMPT if plain_language else GROUNDING_SYSTEM_PROMPT
 
 
+# Strip [N] markers + boilerplate disclaimer so prior turns are clean prose
+# in the new context (not bloated with stale citation indices that referenced
+# chunks the LLM no longer has).
+_CITE_RE = __import__("re").compile(r"\[\d+\]")
+_DISCLAIMER_RE = __import__("re").compile(
+    r"This is for information only — please.*?(?:\n|$)", __import__("re").IGNORECASE,
+)
+
+
+def _clean_history_message(role: str, content: str) -> str:
+    if role != "assistant":
+        return content
+    cleaned = _CITE_RE.sub("", content)
+    cleaned = _DISCLAIMER_RE.sub("", cleaned)
+    return cleaned.strip()
+
+
+def _build_messages(
+    system_prompt: str,
+    user_message: str,
+    history: list[dict] | None,
+) -> list[dict]:
+    """Build the OpenAI-compatible messages array used by Ollama and OpenAI.
+
+    Past turns appear bare (no chunk context, no [N] markers); only the
+    current user message carries the retrieval context block.
+    """
+    msgs: list[dict] = [{"role": "system", "content": system_prompt}]
+    if history:
+        for m in history[-12:]:  # cap at 6 turns
+            role = m.get("role")
+            if role not in ("user", "assistant"):
+                continue
+            content = _clean_history_message(role, m.get("content", ""))
+            if not content:
+                continue
+            msgs.append({"role": role, "content": content})
+    msgs.append({"role": "user", "content": user_message})
+    return msgs
+
+
 class LLMProvider(ABC):
     @abstractmethod
     def synthesize(
@@ -154,6 +195,7 @@ class LLMProvider(ABC):
         chunks: list[RetrievedChunk],
         plain_language: bool = False,
         drug_cards: list[str] | None = None,
+        history: list[dict] | None = None,
     ) -> SynthesisResult:
         ...
 
@@ -176,7 +218,10 @@ class ExtractiveProvider(LLMProvider):
         chunks: list[RetrievedChunk],
         plain_language: bool = False,
         drug_cards: list[str] | None = None,
+        history: list[dict] | None = None,
     ) -> SynthesisResult:
+        # Extractive provider doesn't use history — it's a deterministic
+        # sentence-stitcher, not a chat model.
         if not chunks:
             return SynthesisResult(
                 response_text="No relevant passages were found for this query.",
@@ -230,16 +275,16 @@ class OllamaProvider(LLMProvider):
         chunks: list[RetrievedChunk],
         plain_language: bool = False,
         drug_cards: list[str] | None = None,
+        history: list[dict] | None = None,
     ) -> SynthesisResult:
         context = _build_context_block(chunks, drug_cards=drug_cards)
         user_message = f"Context passages:\n\n{context}\n\nQuestion: {query}"
 
         payload = {
             "model": self._model,
-            "messages": [
-                {"role": "system", "content": _select_system_prompt(plain_language)},
-                {"role": "user", "content": user_message},
-            ],
+            "messages": _build_messages(
+                _select_system_prompt(plain_language), user_message, history,
+            ),
             "stream": False,
             # 32K window — Gemma 4 supports long context; large enough that
             # 8+ chunks (each ~500 tokens) fit with room for system prompt,
@@ -299,6 +344,7 @@ class ClaudeProvider(LLMProvider):
         chunks: list[RetrievedChunk],
         plain_language: bool = False,
         drug_cards: list[str] | None = None,
+        history: list[dict] | None = None,
     ) -> SynthesisResult:
         try:
             import anthropic
@@ -308,12 +354,27 @@ class ClaudeProvider(LLMProvider):
         context = _build_context_block(chunks, drug_cards=drug_cards)
         user_message = f"Context passages:\n\n{context}\n\nQuestion: {query}"
 
+        # Anthropic API: system is a top-level field, not a message role.
+        # History entries become alternating user/assistant messages, ending
+        # with the current user_message that carries retrieval context.
+        msgs: list[dict] = []
+        if history:
+            for m in history[-12:]:
+                role = m.get("role")
+                if role not in ("user", "assistant"):
+                    continue
+                content = _clean_history_message(role, m.get("content", ""))
+                if not content:
+                    continue
+                msgs.append({"role": role, "content": content})
+        msgs.append({"role": "user", "content": user_message})
+
         client = anthropic.Anthropic(api_key=self._api_key)
         message = client.messages.create(
             model=self._model,
             max_tokens=self._max_tokens,
             system=_select_system_prompt(plain_language),
-            messages=[{"role": "user", "content": user_message}],
+            messages=msgs,
         )
 
         raw = message.content[0].text
@@ -352,6 +413,7 @@ class OpenAIProvider(LLMProvider):
         chunks: list[RetrievedChunk],
         plain_language: bool = False,
         drug_cards: list[str] | None = None,
+        history: list[dict] | None = None,
     ) -> SynthesisResult:
         try:
             import openai
@@ -365,10 +427,9 @@ class OpenAIProvider(LLMProvider):
         response = client.chat.completions.create(
             model=self._model,
             max_tokens=self._max_tokens,
-            messages=[
-                {"role": "system", "content": _select_system_prompt(plain_language)},
-                {"role": "user", "content": user_message},
-            ],
+            messages=_build_messages(
+                _select_system_prompt(plain_language), user_message, history,
+            ),
         )
 
         raw = response.choices[0].message.content or ""

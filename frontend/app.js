@@ -103,6 +103,13 @@ populateProviderDropdowns().catch(err => {
 });
 
 // ── Consumer chat ────────────────────────────────────────────────────────────
+// Rolling chat history sent with each request so the LLM has multi-turn
+// context. Past assistant turns are stored WITHOUT [N] markers and
+// disclaimer (frontend strips before pushing) so the LLM sees clean prose
+// and isn't confused by stale citation indices.
+const chatHistory = [];           // [{role:'user'|'assistant', content:str}]
+const MAX_HISTORY_TURNS = 6;      // keep last 6 user/assistant pairs
+
 function fillExample(btn) {
   const ta = document.getElementById('consumer-input');
   ta.value = btn.textContent.trim();
@@ -125,6 +132,7 @@ async function sendConsumerMessage() {
   if (!query) return;
 
   appendUserBubble(query);
+  chatHistory.push({ role: 'user', content: query });
   ta.value = '';
   autoResize(ta);
 
@@ -142,6 +150,7 @@ async function sendConsumerMessage() {
       body: JSON.stringify({
         query,
         options: { top_k: 12, retrieval_strategy: 'full', llm_provider: provider, plain_language: simple },
+        history: chatHistory.slice(-MAX_HISTORY_TURNS * 2),  // last N user+assistant pairs
       }),
     });
 
@@ -152,7 +161,12 @@ async function sendConsumerMessage() {
       return;
     }
     const data = await r.json();
-    appendAIBubble(data.response ?? 'No response returned.', data.citations ?? []);
+    const response = data.response ?? 'No response returned.';
+    appendAIBubble(response, data.citations ?? []);
+    // Push BOTH turns to history. The user message was already pushed in
+    // appendUserBubble; here we add the assistant response as clean prose
+    // (strip [N] markers + disclaimer + follow-up section).
+    pushAssistantToHistory(response);
   } catch {
     removeTypingBubble(typing);
     appendAIBubble('Could not reach the API. Make sure the server is running.', []);
@@ -289,6 +303,25 @@ function askFollowup(question) {
   ta.value = question;
   autoResize(ta);
   sendConsumerMessage();
+}
+
+// Strip [N] citation markers, the boilerplate disclaimer, and the
+// "You might also want to know:" follow-up section before pushing the
+// assistant response into chatHistory. The backend will see clean prose.
+function pushAssistantToHistory(response) {
+  let text = response;
+  // Drop the follow-up section (same regex as the main parser, broadened)
+  const followupMarker = /(?:\n|^)\s*(?:\*+|#+)?\s*(?:you\s+might\s+also\s+want\s+to\s+know|follow[-\s]?up\s+questions|suggested\s+questions|related\s+questions)\s*:?\s*\*?\*?[\s\S]*$/i;
+  text = text.replace(followupMarker, '');
+  // Drop the boilerplate disclaimer
+  text = text.replace(/this is for information only[^\n]*/gi, '');
+  // Drop [N] citation markers
+  text = text.replace(/\[\d+\]/g, '');
+  // Collapse extra whitespace
+  text = text.replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+  if (text.length > 5) {
+    chatHistory.push({ role: 'assistant', content: text });
+  }
 }
 
 function scrollChat() {

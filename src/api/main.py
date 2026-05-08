@@ -124,11 +124,21 @@ class QueryOptions(BaseModel):
     plain_language: bool = False      # patient-mode tone + follow-up questions
 
 
+class ChatMessage(BaseModel):
+    role: str = Field(..., pattern="^(user|assistant)$")
+    content: str = Field(..., max_length=8000)
+
+
 class QueryRequest(BaseModel):
     query: str = Field(..., min_length=3, max_length=2000)
     query_type: str | None = Field(default="factual", pattern="^(factual|exploratory|comparative)$")
     filters: QueryFilters = Field(default_factory=QueryFilters)
     options: QueryOptions = Field(default_factory=QueryOptions)
+    # Prior turns of this conversation (oldest first, most recent last).
+    # The current `query` is NOT included — only past turns. Each assistant
+    # entry should be just the answer text (no [N] markers, no source list);
+    # the frontend strips those before sending.
+    history: list[ChatMessage] = Field(default_factory=list)
 
 
 # ─── Endpoints ───────────────────────────────────────────────────────────────
@@ -147,6 +157,18 @@ async def query(
     use_hipporag = strategy in ("hipporag", "full")
     query_embedding: list[float] | None = None
 
+    # Multi-turn awareness: fuse prior user turns into the current query for
+    # retrieval and drug lookup, so pronouns ("its side effects") and
+    # follow-ups resolve to entities mentioned earlier. The LLM still gets
+    # the full turn-by-turn history separately for generation.
+    effective_query = req.query
+    if req.history:
+        prior_user_terms = " ".join(
+            m.content for m in req.history[-6:] if m.role == "user"
+        )
+        if prior_user_terms:
+            effective_query = f"{prior_user_terms} {req.query}"
+
     if dense_weight > 0:
         global _embedder
         if _embedder is None:
@@ -164,7 +186,7 @@ async def query(
                         "the embedding model: `pip install transformers torch`."
                     ),
                 )
-        query_embedding = _embedder.encode([req.query])[0]
+        query_embedding = _embedder.encode([effective_query])[0]
 
     if use_hipporag:
         global _hipporag
@@ -192,7 +214,7 @@ async def query(
 
     try:
         chunks = retriever.retrieve(
-            query=req.query,
+            query=effective_query,
             filters=filter_dict,
             top_k=req.options.top_k,
             dense_weight=dense_weight,
@@ -214,13 +236,14 @@ async def query(
             "metadata": {"retrieval_strategy": req.options.retrieval_strategy, "model_used": "none"},
         }
 
-    # Drug lookup — if the query mentions any known drug, fetch its FDA card
-    # (with PubChem fallback) and inject as authoritative context.
+    # Drug lookup — if the query (or recent turns) mentions any known drug,
+    # fetch its FDA card (with Wikipedia fallback) and inject as authoritative
+    # context.
     drug_cards: list[str] = []
     drug_card_names: list[str] = []
     try:
         with psycopg.connect(DB_DSN) as drug_conn:
-            cards = lookup_drugs_for_query(drug_conn, req.query, max_drugs=3)
+            cards = lookup_drugs_for_query(drug_conn, effective_query, max_drugs=3)
             for c in cards:
                 drug_cards.append(c.to_text())
                 drug_card_names.append(f"{c.name} ({c.source})")
@@ -232,10 +255,12 @@ async def query(
 
     try:
         provider = get_provider(req.options.llm_provider)
+        history_dicts = [{"role": m.role, "content": m.content} for m in req.history]
         synthesis = provider.synthesize(
             req.query, chunks,
             plain_language=req.options.plain_language,
             drug_cards=drug_cards or None,
+            history=history_dicts or None,
         )
     except Exception as exc:
         logger.exception("LLM provider %r failed", req.options.llm_provider)

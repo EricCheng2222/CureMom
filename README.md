@@ -30,7 +30,8 @@ PubMed API                   ChEMBL API (no key required)
 - **Phase 2** ✅ live — section-aware chunking + PubMedBERT (768-dim) embeddings on **all 866K chunks** (abstract + intro/methods/results/discussion from 34,596 OA full-text papers), HuggingFace transformer NER (`d4data/biomedical-ner-all`) over **1.23M entities**, HNSW vector index built
 - **Phase 3** ✅ live — pluggable LLM with per-request model selection in the UI (Ollama dropdown auto-populated with installed models), patient-mode prompt with clickable follow-up suggestions, query-complexity classifier, citation verifier (catches hallucinated `[N]` indices and weakly-supported claims), `/llm/status` health endpoint
 - **Phase 4** ✅ live — HippoRAG Personalized PageRank over a **5.27M-edge entity graph** (built from MeSH descriptors merged with NER co-occurrences), SPLADE sparse-vector pipeline ready to encode
-- **Drug reference layer** ✅ live — **1,719 FDA drug labels** (openFDA) + Wikipedia fallback for older/discontinued drugs. When a query mentions a drug (NER-detected), the structured drug card is injected into the LLM context as authoritative reference alongside retrieved literature.
+- **Drug reference layer** ✅ live — **1,719 FDA drug labels** (openFDA) + Wikipedia fallback for older/discontinued drugs. An LLM query analyzer routes each request: drug-name questions trigger a forward FDA lookup; effect/condition questions ("drugs for muscle relaxation") trigger reverse FTS with LLM-expanded clinical synonyms.
+- **Multi-turn conversation** ✅ live — patient chat sends a rolling history (last 6 turns) with each request. Past Q+A appear bare (no [N] markers, no boilerplate, no drug cards re-injected); only the current turn carries full retrieval context. Pronouns ("its side effects") resolve via the analyzer + retrieval-side query fusion.
 
 **Default retrieval strategy:** `full` = BM25 + dense + HippoRAG PPR rerank.
 
