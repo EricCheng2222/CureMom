@@ -302,9 +302,28 @@ def _build_canonical_nodes(
     """
     # Build NER label → GraphNode lookup (case-insensitive)
     ner_by_label: dict[str, GraphNode] = {n.label.lower(): n for n in ner_nodes.values()}
+    ner_label_set = set(ner_by_label.keys())
 
     canonical: dict[str, GraphNode] = {}     # id -> GraphNode
     label_to_id: dict[str, str] = {}         # lowercase label/alias -> canonical id
+
+    def _ground(text: str) -> list[str]:
+        """Find NER labels that match `text` directly OR via substring
+        overlap in either direction (case-insensitive). Used to ground a
+        canonical entity proposed by the LLM."""
+        t = text.lower()
+        if not t:
+            return []
+        if t in ner_label_set:
+            return [t]
+        # Substring overlap — covers cases like canonical "muscle growth"
+        # grounding via NER "muscle", or NER "skeletal muscle" matching a
+        # canonical "muscle" the LLM picked.
+        hits = []
+        for nl in ner_label_set:
+            if nl in t or t in nl:
+                hits.append(nl)
+        return hits
 
     for e in raw_entities:
         if not isinstance(e, dict):
@@ -318,9 +337,13 @@ def _build_canonical_nodes(
         aliases_raw = e.get("aliases") or []
         aliases = [str(a).strip() for a in aliases_raw if isinstance(a, (str, int))]
 
-        # Grounding: canonical label or any alias must appear in NER set.
+        # Grounding: canonical label or any alias must overlap with NER set.
         candidates = [label] + aliases
-        matching_ner_labels = [c for c in candidates if c.lower() in ner_by_label]
+        matching_ner_labels: list[str] = []
+        for c in candidates:
+            for hit in _ground(c):
+                if hit not in matching_ner_labels:
+                    matching_ner_labels.append(hit)
         if not matching_ner_labels:
             continue   # ungrounded — drop
 
@@ -481,6 +504,35 @@ def extract_graph(
     raw_entities = graph_obj.get("entities", [])
     raw_relations = graph_obj.get("relations", [])
     raw_dump = graph_obj.get("_raw", "") or ""
+
+    # Salvage entities the LLM mentioned in relations but forgot to list in
+    # its `entities` array. Small models (gemma4:e4b in particular) often
+    # emit ~15 relations referencing concepts only ~4 of which made it into
+    # the entity list. Harvest those, treat each as a one-off canonical
+    # entity, and let normal grounding decide if they survive.
+    listed_labels = set()
+    for e in raw_entities:
+        if not isinstance(e, dict):
+            continue
+        listed_labels.add((e.get("label") or "").strip().lower())
+        for a in (e.get("aliases") or []):
+            if isinstance(a, str):
+                listed_labels.add(a.strip().lower())
+
+    for r in raw_relations:
+        if not isinstance(r, dict):
+            continue
+        for field in ("subject", "object"):
+            v = (r.get(field) or "").strip()
+            if not v:
+                continue
+            if v.lower() in listed_labels:
+                continue
+            # Inject as a minimal entity record. Type "OTHER" — the type
+            # only matters for color, and grounding will still require
+            # this label to match an NER hit.
+            raw_entities.append({"label": v, "type": "OTHER", "aliases": []})
+            listed_labels.add(v.lower())
 
     # Build the canonical entity set the LLM picked. Each entity must
     # ground in NER (label or alias matches an NER hit), which prevents
