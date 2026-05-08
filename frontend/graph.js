@@ -186,21 +186,29 @@
     if (!cy.elements().length) return;
     // Pick fcose if registered, otherwise fall back to built-in cose.
     const fcoseAvailable = !!(window.cytoscapeFcose);
+    // Web-like force-directed layout. Randomize=true scatters nodes from
+    // random start positions so chain-shaped graphs (A→B→C→D) get spread
+    // out into 2D instead of collapsing onto a single line. quality='proof'
+    // runs more iterations for better separation.
     cy.layout({
       name: fcoseAvailable ? 'fcose' : 'cose',
       animate: 'end',
-      animationDuration: 400,
-      randomize: false,
-      nodeRepulsion: 14000,         // bigger = more spread
-      idealEdgeLength: 130,         // bigger = longer edges, easier-to-read labels
-      edgeElasticity: 0.35,
-      nestingFactor: 1.2,
-      gravity: 0.20,                // lower = less centripetal pull
-      gravityRange: 4.0,
-      numIter: 2500,
+      animationDuration: 500,
+      randomize: true,                  // scatter from random; key for web-like layout
+      quality: 'proof',                 // more iterations → better convergence
+      nodeRepulsion: 24000,             // bigger = more spread
+      idealEdgeLength: 140,
+      edgeElasticity: 0.30,
+      nestingFactor: 1.1,
+      gravity: 0.08,                    // very low → no central pull, lets web open up
+      gravityRange: 3.0,
+      gravityCompound: 0.5,
+      numIter: 4000,
       tile: true,
-      tilingPaddingVertical: 14,
-      tilingPaddingHorizontal: 14,
+      tilingPaddingVertical: 30,
+      tilingPaddingHorizontal: 30,
+      uniformNodeDimensions: true,
+      packComponents: true,             // disconnected components packed nicely side-by-side
       fit: true,
       padding: 40,
     }).run();
@@ -303,6 +311,30 @@
     if (cy) cy.elements().remove();
   }
 
+  function removeNode(nodeId) {
+    if (!nodeId) return false;
+    if (!state.nodes.has(nodeId)) return false;
+    // Remove every edge touching this node from session state.
+    const edgesToDrop = [];
+    for (const [eid, edge] of state.edges.entries()) {
+      if (edge.source === nodeId || edge.target === nodeId) {
+        edgesToDrop.push(eid);
+      }
+    }
+    for (const eid of edgesToDrop) state.edges.delete(eid);
+    state.nodes.delete(nodeId);
+    if (cy) {
+      const cyNode = cy.getElementById(nodeId);
+      if (cyNode && cyNode.length) {
+        // Cytoscape's remove() on a node also removes incident edges.
+        cyNode.remove();
+      }
+    }
+    // Re-layout if there are still elements; otherwise leave canvas empty.
+    if (cy && cy.elements().length) _layout();
+    return true;
+  }
+
   function exportJSON() {
     return {
       nodes: Array.from(state.nodes.values()),
@@ -335,5 +367,5 @@
     cy.resize();
   }
 
-  window.KGraph = { init, merge, clear, exportJSON, size, onNodeClick, zoomBy, fit, resize };
+  window.KGraph = { init, merge, clear, removeNode, exportJSON, size, onNodeClick, zoomBy, fit, resize };
 })();

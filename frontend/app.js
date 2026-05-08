@@ -333,7 +333,10 @@ function _onGraphNodeClick(nodePayload) {
       <div class="popover-type-chip">${escapeHtml(_humanizeType(nodePayload.type))}</div>
     </div>
     ${citePills}
-    <button class="popover-ask-btn">Ask about this</button>
+    <div class="popover-actions">
+      <button class="popover-ask-btn">Ask about this</button>
+      <button class="popover-remove-btn" title="Remove this node from the graph">Remove</button>
+    </div>
   `;
 
   // Position near the node, clamped to the canvas wrap
@@ -350,6 +353,12 @@ function _onGraphNodeClick(nodePayload) {
     ta.value = `Tell me more about ${nodePayload.label} in this context.`;
     autoResize(ta);
     ta.focus();
+    _hidePopover();
+  });
+  pop.querySelector('.popover-remove-btn')?.addEventListener('click', () => {
+    if (!_graphInitialized) return;
+    KGraph.removeNode(nodePayload.id);
+    _refreshGraphChrome();
     _hidePopover();
   });
 }

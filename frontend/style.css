@@ -1147,8 +1147,13 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); }
   color: var(--muted);
   margin: 4px 0 10px;
 }
+.popover-actions {
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
+}
 .popover-ask-btn {
-  width: 100%;
+  flex: 1;
   padding: 8px 10px;
   border-radius: var(--radius-sm);
   background: linear-gradient(135deg, var(--indigo) 0%, var(--indigo-d) 100%);
@@ -1160,6 +1165,21 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); }
   transition: filter 0.15s;
 }
 .popover-ask-btn:hover { filter: brightness(1.08); }
+.popover-remove-btn {
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--red);
+  border: 1px solid rgba(248,113,113,.4);
+  font-weight: 600;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.popover-remove-btn:hover {
+  background: rgba(248,113,113,.12);
+  border-color: var(--red);
+}
 .popover-close-x {
   position: absolute;
   top: 6px;
