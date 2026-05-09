@@ -2,6 +2,26 @@
 
 const API = '';
 
+// FastAPI returns errors in three shapes:
+//   { detail: "string message" }                — explicit HTTPException
+//   { detail: [{type, loc, msg, ...}, ...] }   — Pydantic 422 validation
+//   {}                                          — body parse failed
+// `${err.detail ?? r.statusText}` ends up rendering "[object Object]" for
+// the array case, which is what showed up to the user. This helper coerces
+// each shape into a readable single line.
+function _formatErr(err, r) {
+  const d = err && err.detail;
+  if (typeof d === 'string') return d;
+  if (Array.isArray(d)) {
+    return d.map((e) => {
+      const where = Array.isArray(e.loc) ? e.loc.slice(1).join('.') : '';
+      return where ? `${where}: ${e.msg}` : (e.msg || JSON.stringify(e));
+    }).join('; ');
+  }
+  if (d && typeof d === 'object') return JSON.stringify(d);
+  return r ? `HTTP ${r.status} ${r.statusText}` : 'unknown error';
+}
+
 // ── View switching ──────────────────────────────────────────────────────────
 function switchMode(mode) {
   ['landing', 'consumer', 'professional'].forEach(v => {
@@ -525,7 +545,8 @@ async function sendConsumerMessage() {
     removeTypingBubble(typing);
     if (!r.ok) {
       const err = await r.json().catch(() => ({}));
-      appendAIBubble(`Sorry, I couldn't get a response. ${err.detail ?? r.statusText}`, []);
+      appendAIBubble(`Sorry, I couldn't get a response. ${_formatErr(err, r)}`, []);
+      console.error('[query] HTTP', r.status, err);
       return;
     }
     const data = await r.json();
@@ -752,7 +773,8 @@ async function sendProQuery() {
     });
     if (!r.ok) {
       const err = await r.json().catch(() => ({}));
-      resultsEl.innerHTML = `<div class="empty-state"><p>Error: ${err.detail ?? r.statusText}</p></div>`;
+      resultsEl.innerHTML = `<div class="empty-state"><p>Error: ${_formatErr(err, r)}</p></div>`;
+      console.error('[pro-search] HTTP', r.status, err);
       return;
     }
     renderProResults(await r.json());
