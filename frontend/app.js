@@ -76,6 +76,7 @@ async function populateProviderDropdowns() {
   const defaultOllama = ollama.model;
   const claude = status.providers?.claude || {};
   const openai = status.providers?.openai || {};
+  const nim = status.providers?.nim || {};
 
   for (const id of ['consumer-provider', 'pro-provider']) {
     const sel = document.getElementById(id);
@@ -114,6 +115,12 @@ async function populateProviderDropdowns() {
       const opt = document.createElement('option');
       opt.value = 'openai';
       opt.textContent = `OpenAI (${openai.model})`;
+      sel.appendChild(opt);
+    }
+    if (nim.available) {
+      const opt = document.createElement('option');
+      opt.value = 'nim';
+      opt.textContent = `NVIDIA NIM (${nim.model})`;
       sel.appendChild(opt);
     }
 

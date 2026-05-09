@@ -445,13 +445,73 @@ class OpenAIProvider(LLMProvider):
         )
 
 
+class NIMProvider(LLMProvider):
+    """NVIDIA NIM (Inference Microservices) — OpenAI-compatible chat
+    completions hosted at integrate.api.nvidia.com. Free tier covers
+    open-weight models like minimaxai/minimax-m2.7."""
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+        model: str = "minimaxai/minimax-m2.7",
+        max_tokens: int = 1024,
+        base_url: str = "https://integrate.api.nvidia.com/v1",
+    ) -> None:
+        self._api_key = api_key or os.environ["NVIDIA_API_KEY"]
+        self._model = model
+        self._max_tokens = max_tokens
+        self._base_url = base_url
+
+    @property
+    def name(self) -> str:
+        return f"nim/{self._model}"
+
+    def synthesize(
+        self,
+        query: str,
+        chunks: list[RetrievedChunk],
+        plain_language: bool = False,
+        drug_cards: list[str] | None = None,
+        history: list[dict] | None = None,
+    ) -> SynthesisResult:
+        try:
+            import openai
+        except ImportError as exc:
+            raise RuntimeError("Install openai package: pip install openai") from exc
+
+        context = _build_context_block(chunks, drug_cards=drug_cards)
+        user_message = f"Context passages:\n\n{context}\n\nQuestion: {query}"
+
+        client = openai.OpenAI(api_key=self._api_key, base_url=self._base_url)
+        response = client.chat.completions.create(
+            model=self._model,
+            max_tokens=self._max_tokens,
+            messages=_build_messages(
+                _select_system_prompt(plain_language), user_message, history,
+            ),
+        )
+
+        raw = response.choices[0].message.content or ""
+        indices = _parse_citation_indices(raw)
+        cited_ids = [chunks[i - 1].chunk_id for i in indices if 1 <= i <= len(chunks)]
+
+        return SynthesisResult(
+            response_text=raw,
+            citation_indices=indices,
+            cited_chunk_ids=cited_ids,
+            model_used=self.name,
+            raw_response=raw,
+        )
+
+
 def get_provider(provider_spec: str | None = None) -> LLMProvider:
     """Factory: return the appropriate LLMProvider.
 
     `provider_spec` is either a bare provider name ("extractive", "ollama",
-    "claude", "openai") or a provider/model override ("ollama/medgemma:4b",
-    "claude/claude-haiku-4-5"). When no model is specified, the
-    corresponding env var is used (OLLAMA_MODEL / CLAUDE_MODEL / OPENAI_MODEL).
+    "claude", "openai", "nim") or a provider/model override
+    ("ollama/medgemma:4b", "claude/claude-haiku-4-5", "nim/minimaxai/minimax-m2.7").
+    When no model is specified, the corresponding env var is used
+    (OLLAMA_MODEL / CLAUDE_MODEL / OPENAI_MODEL / NIM_MODEL).
     """
     spec = provider_spec or os.environ.get("LLM_PROVIDER", "extractive")
     head, _, model_override = spec.partition("/")
@@ -477,7 +537,12 @@ def get_provider(provider_spec: str | None = None) -> LLMProvider:
             model=model_override or os.environ.get("OPENAI_MODEL", "gpt-4o"),
         )
 
+    if head == "nim":
+        return NIMProvider(
+            model=model_override or os.environ.get("NIM_MODEL", "minimaxai/minimax-m2.7"),
+        )
+
     raise ValueError(
         f"Unknown LLM provider: {head!r}. Choose: extractive, ollama[/<model>], "
-        "claude[/<model>], openai[/<model>]"
+        "claude[/<model>], openai[/<model>], nim[/<model>]"
     )

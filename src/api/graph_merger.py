@@ -109,6 +109,8 @@ def dedup_entities(
         raw = _claude_dedup(user_msg, timeout_s)
     elif target == "openai":
         raw = _openai_dedup(user_msg, timeout_s)
+    elif target == "nim":
+        raw = _nim_dedup(user_msg, provider_spec, timeout_s)
     else:
         raw = _ollama_dedup(user_msg, provider_spec, timeout_s)
 
@@ -124,6 +126,8 @@ def _resolve_provider(provider_spec: str | None) -> str:
         return "claude"
     if provider_spec == "openai":
         return "openai"
+    if provider_spec.startswith("nim/") or provider_spec == "nim":
+        return "nim"
     return "ollama"
 
 
@@ -190,6 +194,32 @@ def _openai_dedup(user_msg: str, timeout_s: float) -> str:
         ],
         response_format={"type": "json_object"},
         temperature=0.0,
+    )
+    return resp.choices[0].message.content or ""
+
+
+def _nim_dedup(user_msg: str, provider_spec: str | None, timeout_s: float) -> str:
+    import openai
+
+    api_key = os.environ.get("NVIDIA_API_KEY", "").strip()
+    if not api_key or api_key == "your_nvidia_api_key_here":
+        raise RuntimeError("NVIDIA_API_KEY not set in env")
+    if provider_spec and provider_spec.startswith("nim/"):
+        model = provider_spec.split("/", 1)[1]
+    else:
+        model = os.environ.get("NIM_MODEL", "minimaxai/minimax-m2.7")
+    base_url = os.environ.get("NIM_BASE_URL", "https://integrate.api.nvidia.com/v1")
+
+    logger.info("graph_dedup: calling NIM (model=%s, timeout=%.0fs)", model, timeout_s)
+    client = openai.OpenAI(api_key=api_key, base_url=base_url, timeout=timeout_s)
+    resp = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": _DEDUP_PROMPT},
+            {"role": "user", "content": user_msg},
+        ],
+        temperature=0.0,
+        max_tokens=2048,
     )
     return resp.choices[0].message.content or ""
 

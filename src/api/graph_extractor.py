@@ -174,8 +174,8 @@ def _build_user_message(query: str, answer: str) -> str:
 def _resolve_provider(provider_spec: str | None) -> str:
     """Decide which provider to actually call based on the dropdown.
 
-    Returns "ollama", "claude", "openai", or "ollama" as the safe default
-    for "extractive" / unknown.
+    Returns "ollama", "claude", "openai", "nim", or "ollama" as the safe
+    default for "extractive" / unknown.
     """
     if not provider_spec:
         return "ollama"
@@ -185,6 +185,8 @@ def _resolve_provider(provider_spec: str | None) -> str:
         return "claude"
     if provider_spec == "openai":
         return "openai"
+    if provider_spec.startswith("nim/") or provider_spec == "nim":
+        return "nim"
     return "ollama"
 
 
@@ -212,6 +214,8 @@ def _llm_graph(
         return _claude_graph(user_msg, timeout_s)
     if target == "openai":
         return _openai_graph(user_msg, timeout_s)
+    if target == "nim":
+        return _nim_graph(user_msg, provider_spec, timeout_s)
     return _ollama_graph(user_msg, provider_spec, timeout_s)
 
 
@@ -284,6 +288,40 @@ def _openai_graph(user_msg: str, timeout_s: float) -> dict[str, Any]:
         ],
         response_format={"type": "json_object"},
         temperature=0.0,
+    )
+    raw = resp.choices[0].message.content or ""
+    return _parse_graph(raw)
+
+
+def _nim_graph(user_msg: str, provider_spec: str | None, timeout_s: float) -> dict[str, Any]:
+    """Call NVIDIA NIM (OpenAI-compatible) chat completions.
+
+    Uses the OpenAI SDK with a custom base_url. We rely on prompt-based
+    JSON output (system prompt says "output ONLY this JSON") rather than
+    response_format=json_object, since NIM's MiniMax-M2.7 doesn't reliably
+    accept that flag — _parse_graph extracts the JSON object via regex.
+    """
+    import openai
+
+    api_key = os.environ.get("NVIDIA_API_KEY", "").strip()
+    if not api_key or api_key == "your_nvidia_api_key_here":
+        raise RuntimeError("NVIDIA_API_KEY not set in env")
+    if provider_spec and provider_spec.startswith("nim/"):
+        model = provider_spec.split("/", 1)[1]
+    else:
+        model = os.environ.get("NIM_MODEL", "minimaxai/minimax-m2.7")
+    base_url = os.environ.get("NIM_BASE_URL", "https://integrate.api.nvidia.com/v1")
+
+    logger.info("graph_extract: calling NIM (model=%s, timeout=%.0fs)", model, timeout_s)
+    client = openai.OpenAI(api_key=api_key, base_url=base_url, timeout=timeout_s)
+    resp = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": _GRAPH_PROMPT},
+            {"role": "user", "content": user_msg},
+        ],
+        temperature=0.0,
+        max_tokens=4096,
     )
     raw = resp.choices[0].message.content or ""
     return _parse_graph(raw)

@@ -603,6 +603,12 @@ async def llm_status() -> dict:
                           and os.environ.get("OPENAI_API_KEY") != "your_openai_api_key_here"),
         "model": os.environ.get("OPENAI_MODEL", "gpt-4o"),
     }
+    out["providers"]["nim"] = {
+        "available": bool(os.environ.get("NVIDIA_API_KEY", "").strip()
+                          and os.environ.get("NVIDIA_API_KEY") != "your_nvidia_api_key_here"),
+        "model": os.environ.get("NIM_MODEL", "minimaxai/minimax-m2.7"),
+        "endpoint": os.environ.get("NIM_BASE_URL", "https://integrate.api.nvidia.com/v1"),
+    }
     return out
 
 
