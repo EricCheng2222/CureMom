@@ -965,6 +965,26 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); }
 .graph-actions {
   display: flex;
   gap: 6px;
+  align-items: center;
+}
+.graph-search-input {
+  background: var(--surface);
+  border: 1px solid var(--border-2);
+  color: var(--text);
+  padding: 5px 9px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-family: inherit;
+  width: 140px;
+  transition: border-color 0.15s, width 0.2s;
+  outline: none;
+}
+.graph-search-input::placeholder {
+  color: var(--text-3);
+}
+.graph-search-input:focus {
+  border-color: var(--accent, var(--border-strong));
+  width: 200px;
 }
 .graph-action-btn {
   background: transparent;

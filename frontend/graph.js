@@ -113,6 +113,14 @@
           style: { 'opacity': 0.25 },
         },
         {
+          selector: 'node.search-dim',
+          style: { 'opacity': 0.12 },
+        },
+        {
+          selector: 'edge.search-dim',
+          style: { 'opacity': 0.06 },
+        },
+        {
           selector: 'edge',
           style: {
             'curve-style':       'bezier',
@@ -453,6 +461,36 @@
     return { groupsApplied, nodesRemoved };
   }
 
+  function searchNodes(rawQuery) {
+    // Live filter: nodes whose label contains `rawQuery` (case-insensitive)
+    // stay vivid; everything else is dimmed. Edges between two matching
+    // nodes also stay vivid; any edge with a non-matching endpoint dims.
+    // Empty query restores the default view.
+    if (!cy) return { matched: 0, total: 0 };
+    cy.elements().removeClass('search-dim');
+    const q = (rawQuery || '').trim().toLowerCase();
+    if (!q) return { matched: 0, total: state.nodes.size };
+
+    const matched = cy.nodes().filter((n) => {
+      return (n.data('label') || '').toLowerCase().includes(q);
+    });
+    if (matched.length === 0) {
+      // No hits — dim everything so the user sees the filter took effect.
+      cy.elements().addClass('search-dim');
+      return { matched: 0, total: state.nodes.size };
+    }
+    const matchedIds = new Set(matched.map((n) => n.id()));
+    cy.nodes().forEach((n) => {
+      if (!matchedIds.has(n.id())) n.addClass('search-dim');
+    });
+    cy.edges().forEach((e) => {
+      if (!matchedIds.has(e.data('source')) || !matchedIds.has(e.data('target'))) {
+        e.addClass('search-dim');
+      }
+    });
+    return { matched: matched.length, total: state.nodes.size };
+  }
+
   function removeNode(nodeId) {
     if (!nodeId) return false;
     if (!state.nodes.has(nodeId)) return false;
@@ -509,5 +547,5 @@
     cy.resize();
   }
 
-  window.KGraph = { init, merge, clear, removeNode, applyMergeGroups, exportJSON, size, onNodeClick, zoomBy, fit, resize };
+  window.KGraph = { init, merge, clear, removeNode, applyMergeGroups, searchNodes, exportJSON, size, onNodeClick, zoomBy, fit, resize };
 })();

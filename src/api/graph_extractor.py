@@ -95,63 +95,6 @@ _KNOWN_TYPES = {
 }
 
 
-def _gather_entities(
-    query: str,
-    answer: str,
-) -> dict[str, GraphNode]:
-    """Run NER over the question and answer ONLY (not the chunks).
-
-    The answer is already a synthesized summary of the chunks — running
-    NER over the chunks too just produces noise and slows things down.
-    Citations on nodes are populated later (server-side) by mapping LLM
-    citation indices back to chunk_ids.
-
-    Returns a dict keyed by node id (slug or kb_id) so duplicate spans
-    merge naturally.
-    """
-    # Lazy import — keeps module import cheap, mirrors hipporag.extract_query_entities.
-    from ..search.hipporag import extract_query_entities  # noqa: F401  (warms model cache)
-    from ..embeddings.ner_pipeline import _NERRunner
-
-    # Reuse hipporag's cached runner if it already exists; otherwise create a
-    # local one. extract_query_entities() initialises and caches the runner
-    # as a side-effect, so call it once on the query to ensure the singleton
-    # is loaded.
-    extract_query_entities(query)  # warms hipporag._query_ner_runner
-    from ..search import hipporag as _hr
-    runner: _NERRunner = _hr._query_ner_runner  # type: ignore[attr-defined]
-
-    by_id: dict[str, GraphNode] = {}
-
-    def _add(text: str) -> None:
-        for ent in runner.extract(text, paper_id=0, chunk_id=0):
-            label = ent.entity_text.strip().rstrip(',.;:')
-            # Minimal pre-filter — only obvious junk that wastes LLM tokens.
-            # Canonicalization (folding "muscle" → "skeletal muscle", dropping
-            # vague terms) is delegated to the LLM downstream.
-            if len(label) < 3:
-                continue
-            if not any(ch.isalpha() for ch in label):
-                continue
-            if label.endswith('/') or label.endswith('-') or label.endswith(','):
-                continue
-            etype = ent.entity_type if ent.entity_type in _KNOWN_TYPES else "OTHER"
-            nid = ent.kb_id or _slugify(label)
-            node = by_id.get(nid)
-            if node is None:
-                by_id[nid] = GraphNode(
-                    id=nid, label=label, type=etype, kb_id=ent.kb_id, citations=[],
-                )
-            else:
-                if len(label) > len(node.label):
-                    node.label = label
-
-    _add(query)
-    _add(answer)
-
-    return by_id
-
-
 # ─── LLM relation extraction ─────────────────────────────────────────────────
 
 _GRAPH_PROMPT = """You extract a small biomedical knowledge graph from a question and a synthesized answer.
@@ -221,12 +164,10 @@ Output:
 ]}"""
 
 
-def _build_user_message(query: str, answer: str, candidate_entities: list[str]) -> str:
-    candidates_sorted = sorted(candidate_entities, key=lambda s: -len(s))[:60]
+def _build_user_message(query: str, answer: str) -> str:
     return (
         f"Question: {query}\n\n"
-        f"Answer (with [N] citation markers): {answer[:5000]}\n\n"
-        f"NER candidate entities ({len(candidates_sorted)}): {', '.join(candidates_sorted)}"
+        f"Answer (with [N] citation markers): {answer[:5000]}"
     )
 
 
@@ -250,7 +191,6 @@ def _resolve_provider(provider_spec: str | None) -> str:
 def _llm_graph(
     query: str,
     answer: str,
-    candidate_entities: list[str],
     provider_spec: str | None = None,
     timeout_s: float | None = None,
 ) -> dict[str, Any]:
@@ -265,7 +205,7 @@ def _llm_graph(
     if timeout_s is None:
         timeout_s = float(os.environ.get("GRAPH_TIMEOUT_S", "600"))
 
-    user_msg = _build_user_message(query, answer, candidate_entities)
+    user_msg = _build_user_message(query, answer)
     target = _resolve_provider(provider_spec)
 
     if target == "claude":
@@ -369,7 +309,6 @@ def _parse_graph(raw: str) -> dict[str, Any]:
 
 def _build_nodes_from_relations(
     raw_relations: list[dict[str, Any]],
-    ner_nodes: dict[str, GraphNode],
     answer_text: str = "",
 ) -> tuple[list[GraphNode], dict[str, str]]:
     """Each unique subject/object string in `raw_relations` becomes a node.
@@ -377,31 +316,18 @@ def _build_nodes_from_relations(
     Dedup is purely by the LLM's chosen surface form (case-insensitive).
     The LLM is instructed to use ONE spelling per concept across all
     relations; if it doesn't, the duplicates show up as separate nodes
-    — that's a cleaner failure than the previous two-list match.
+    (the Merge button can fold them later).
 
-    Grounding rule: a node is kept iff its label either
-      (a) overlaps with some NER hit (substring in either direction), OR
-      (b) appears as a substring of the answer text itself.
-    The answer text is the authoritative source — NER is just one
-    (incomplete) view of it. Without (b) we'd reject perfectly real
-    concepts the small NER model happened to miss (pathway names,
-    abbreviations, multi-token entities).
-    Vague single-word labels are still dropped.
+    Grounding rule: a node is kept iff its label appears (case-
+    insensitively) as a substring of the answer text. The answer is the
+    authoritative source — if the LLM emits a concept that isn't in the
+    answer, it invented it. Vague single-word labels are still dropped
+    by the _VAGUE_LABELS filter.
     """
-    ner_label_set = {n.label.lower() for n in ner_nodes.values()}
     answer_lc = (answer_text or "").lower()
 
     def _grounded(label_lc: str) -> bool:
-        """Accept if label overlaps NER OR appears in the answer text."""
-        if label_lc in ner_label_set:
-            return True
-        for nl in ner_label_set:
-            if nl in label_lc or label_lc in nl:
-                return True
-        # Answer-text fallback. Keeps real concepts NER missed.
-        if answer_lc and label_lc in answer_lc:
-            return True
-        return False
+        return bool(answer_lc) and label_lc in answer_lc
 
     # First pass: collect every unique subject/object the LLM mentioned.
     seen_labels: dict[str, str] = {}  # lowercase -> canonical label (first form seen)
@@ -565,13 +491,6 @@ def extract_graph(
     if not query or not answer:
         return GraphPayload(nodes=[], edges=[])
 
-    ner_nodes = _gather_entities(query, answer)
-    if not ner_nodes:
-        logger.info("graph_extract: NER produced no entities; returning empty graph")
-        return GraphPayload(nodes=[], edges=[])
-
-    candidate_labels = sorted({n.label for n in ner_nodes.values()})
-
     # Map [N] citation index → chunk_id. The frontend sends `chunks` in the
     # same order as the citation pills, so chunks[i] corresponds to [i+1].
     citation_index_to_chunk_id: dict[int, int] = {
@@ -581,7 +500,6 @@ def extract_graph(
     try:
         graph_obj = _llm_graph(
             query=query, answer=answer,
-            candidate_entities=candidate_labels,
             provider_spec=provider_spec,
         )
     except Exception as exc:
@@ -593,10 +511,11 @@ def extract_graph(
     raw_dump = graph_obj.get("_raw", "") or ""
 
     # Each unique subject/object string in the relations becomes a node.
-    # Grounding accepts the label if it appears in the NER set OR as a
-    # substring of the answer text — the answer is the authoritative source.
+    # Grounding: the label must appear (case-insensitively) as a substring
+    # of the answer text. The answer is the authoritative source — NER
+    # was an incomplete proxy for "is this concept actually mentioned".
     canonical_nodes, label_to_id = _build_nodes_from_relations(
-        raw_relations, ner_nodes, answer_text=answer,
+        raw_relations, answer_text=answer,
     )
 
     edges = _build_edges(raw_relations, label_to_id, citation_index_to_chunk_id)
@@ -624,7 +543,6 @@ def extract_graph(
         n.citations = node_citations.get(n.id, [])
 
     stage_counts = (
-        f"NER={len(ner_nodes)} → "
         f"LLM(raw_relations={len(raw_relations)}) → "
         f"grounded_nodes={len(canonical_nodes)} → "
         f"edges={len(edges)} → "
@@ -639,8 +557,7 @@ def extract_graph(
         elif not canonical_nodes:
             cause = (
                 "every relation subject/object was rejected by grounding — "
-                "either NER missed all the named concepts or the LLM "
-                "invented entities not in the answer"
+                "the LLM emitted concepts not present in the answer text"
             )
         else:
             cause = "edges built but nothing survived filtering"

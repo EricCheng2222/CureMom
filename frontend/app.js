@@ -165,6 +165,21 @@ function setupKnowledgeGraph() {
   });
   document.getElementById('graph-merge-btn')?.addEventListener('click', _onMergeClick);
 
+  const searchInput = document.getElementById('graph-search');
+  if (searchInput) {
+    searchInput.addEventListener('input', (e) => {
+      ensureGraphInit();
+      KGraph.searchNodes(e.target.value);
+    });
+    searchInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        e.target.value = '';
+        KGraph.searchNodes('');
+        e.target.blur();
+      }
+    });
+  }
+
   // When the panel is shown after being hidden, the canvas needs a resize.
   // Also resize on window resize so labels don't get clipped.
   window.addEventListener('resize', () => {
