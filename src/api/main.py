@@ -119,7 +119,9 @@ class QueryFilters(BaseModel):
 
 
 class QueryOptions(BaseModel):
-    top_k: int = Field(default=10, ge=1, le=50)
+    # Upper cap on returned chunks. Retriever pulls a 100-candidate pool
+    # and returns 10% of it (floored at 5, capped at this top_k).
+    top_k: int = Field(default=20, ge=1, le=50)
     retrieval_strategy: str = Field(default="full", pattern="^(bm25|hybrid|hipporag|full)$")
     include_full_passages: bool = True
     llm_provider: str | None = None   # override LLM_PROVIDER env var

@@ -167,29 +167,38 @@ class HybridRetriever:
         self,
         query: str,
         filters: dict[str, Any] | None = None,
-        top_k: int = 10,
+        top_k: int = 20,
         dense_weight: float = 0.0,  # 0.0 = BM25 only; 0.5 = hybrid
         query_embedding: list[float] | None = None,
         use_hipporag: bool = False,
         hipporag_weight: float = 0.3,
+        dynamic_ratio: float = 0.10,
+        min_results: int = 5,
     ) -> list[RetrievedChunk]:
         """Main retrieval method.
+
+        `top_k` is now an UPPER CAP, not a fixed target. The number of
+        results returned is `clamp(min_results, top_k, int(pool * dynamic_ratio))`
+        so broad queries with many strong candidates get more chunks than
+        narrow factual lookups. Defaults: 10% of candidate pool, floor 5,
+        cap top_k=20.
 
         Phase 1: dense_weight=0 (BM25 only, no embedding needed).
         Phase 2: dense_weight>0 with query_embedding provided.
         """
         effective_filters = self._expand_query(query, filters or {})
-        # Strip internal flags before passing to ES
         es_filters = {k: v for k, v in effective_filters.items() if k != "use_mesh_expansion"}
 
-        # BM25 retrieval
-        bm25_results = search_bm25(self._es, query, es_filters, top_k=top_k * 2)
+        # Pull a generous candidate pool so the 10%-dynamic slice is
+        # meaningful. The pool size is the bigger of (5 * top_k, 100) —
+        # top_k=20 (default) → 100 candidates per side; top_k=50 → 250.
+        pool_size = max(top_k * 5, 100)
+        bm25_results = search_bm25(self._es, query, es_filters, top_k=pool_size)
         bm25_ranks: dict[str, int] = {r["pmid"]: i + 1 for i, r in enumerate(bm25_results)}
 
-        # Dense retrieval (Phase 2+)
         dense_ranks: dict[str, int] = {}
         if dense_weight > 0 and query_embedding:
-            dense_results = self._dense_search(query_embedding, top_k=top_k * 2)
+            dense_results = self._dense_search(query_embedding, top_k=pool_size)
             dense_ranks = {pmid: i + 1 for i, (pmid, _) in enumerate(dense_results)}
 
         # Combine via RRF
@@ -200,9 +209,16 @@ class HybridRetriever:
             scored.append((pmid, score))
 
         scored.sort(key=lambda x: x[1], reverse=True)
-        # Pull more candidates than top_k so HippoRAG re-ranking has room to work
-        candidate_pool_size = top_k * 3 if (use_hipporag and self._hipporag) else top_k
-        top_pmids = [pmid for pmid, _ in scored[:candidate_pool_size]]
+
+        # Compute the dynamic target count: 10% of the actual candidate pool,
+        # floored at min_results, capped at top_k. The retriever decides how
+        # many chunks to return based on apparent query richness.
+        candidate_count = len(scored)
+        target_k = max(min_results, min(top_k, int(candidate_count * dynamic_ratio)))
+
+        # HippoRAG re-rank gets 3× the target so it has room to reorder.
+        rerank_pool_size = target_k * 3 if (use_hipporag and self._hipporag) else target_k
+        top_pmids = [pmid for pmid, _ in scored[:rerank_pool_size]]
         score_map = dict(scored)
 
         # Fetch chunks from DB
@@ -226,9 +242,9 @@ class HybridRetriever:
                 key=lambda p: score_map.get(p, 0.0) + hipporag_weight * pmid_boost.get(p, 0.0),
                 reverse=True,
             )
-            top_pmids = combined[:top_k]
+            top_pmids = combined[:target_k]
         else:
-            top_pmids = top_pmids[:top_k]
+            top_pmids = top_pmids[:target_k]
 
         results: list[RetrievedChunk] = []
         for pmid in top_pmids:
