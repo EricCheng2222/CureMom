@@ -247,6 +247,27 @@ TOPICS: list[IngestionTopic] = [
         description="Ichthyosis treatments — retinoids, emollients, gene therapy, clinical trials",
         priority=1,
     ),
+    # ── Creatine (mechanism + clinical) ─────────────────────────────────────
+    # Pulled out of the broader pharmacology_nutritional_compounds bucket so
+    # the corpus has dedicated coverage. Two angles:
+    #   1. Biochemistry / pharmacology — what creatine does at the cellular
+    #      level (PCr buffer, mTOR signalling, satellite-cell biology).
+    #   2. Clinical evidence — RCTs and human trials across populations
+    #      (athletic, sarcopenia, neuro, cardiac).
+
+    IngestionTopic(
+        name="creatine_pharmacology",
+        mesh_query='"Creatine"[MeSH] OR "Phosphocreatine"[MeSH] OR "Creatine Kinase"[MeSH]',
+        description="Creatine pharmacology and biochemistry — phosphocreatine, creatine kinase, energetics",
+        priority=1,
+    ),
+    IngestionTopic(
+        name="creatine_clinical",
+        mesh_query='"Creatine"[MeSH] AND ("Randomized Controlled Trial"[Publication Type] OR "Clinical Trial"[Publication Type] OR "Meta-Analysis"[Publication Type] OR "Systematic Review"[Publication Type])',
+        description="Creatine in human studies — RCTs, meta-analyses, systematic reviews",
+        priority=1,
+    ),
+
     IngestionTopic(
         name="skin_barrier_function",
         mesh_query='("Filaggrin Proteins"[MeSH] OR "Loricrin"[Title/Abstract] OR "Transglutaminases"[MeSH] OR "Stratum Corneum"[Title/Abstract]) AND ("skin"[MeSH] OR "epidermis"[MeSH])',
