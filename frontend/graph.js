@@ -24,17 +24,30 @@
       return fallback;
     }
   }
-  const NODE_TYPE_COLORS = {
-    CHEMICAL:             _readVar('--node-chemical', '#34D399'),
-    DISEASE:              _readVar('--node-disease',  '#F87171'),
-    GENE_OR_GENE_PRODUCT: _readVar('--node-gene',     '#818CF8'),
-    ANATOMY:              _readVar('--node-anatomy',  '#FBBF24'),
-    SYMPTOM:              _readVar('--node-symptom',  '#FB7185'),
-    PROCEDURE:            _readVar('--node-procedure','#A78BFA'),
-    CELL_TYPE:            _readVar('--node-anatomy',  '#FBBF24'),
-    ORGANISM:             _readVar('--node-default',  '#94A3B8'),
-    OTHER:                _readVar('--node-default',  '#94A3B8'),
-  };
+  // Deterministic per-label palette. We dropped semantic types (everything
+  // is OTHER now) so we can't color by type — instead, hash the label to
+  // pick from a vibrant palette. Same concept across turns = same color.
+  const NODE_PALETTE = [
+    _readVar('--node-chemical',  '#34D399'),  // mint green
+    _readVar('--node-disease',   '#F87171'),  // coral red
+    _readVar('--node-gene',      '#818CF8'),  // periwinkle
+    _readVar('--node-anatomy',   '#FBBF24'),  // amber
+    _readVar('--node-symptom',   '#FB7185'),  // rose
+    _readVar('--node-procedure', '#A78BFA'),  // lavender
+    '#22D3EE',                                // cyan
+    '#F472B6',                                // pink
+    '#84CC16',                                // lime
+    '#FB923C',                                // orange
+  ];
+  function _colorFor(label) {
+    // Simple djb2-style hash → palette index. Stable across reloads.
+    const s = (label || '').toLowerCase();
+    let h = 5381;
+    for (let i = 0; i < s.length; i++) {
+      h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+    }
+    return NODE_PALETTE[Math.abs(h) % NODE_PALETTE.length];
+  }
 
   const state = {
     nodes: new Map(),   // id -> { id, label, type, citations: [], kb_id }
@@ -72,7 +85,7 @@
         {
           selector: 'node',
           style: {
-            'background-color': (ele) => NODE_TYPE_COLORS[ele.data('type')] || NODE_TYPE_COLORS.OTHER,
+            'background-color': (ele) => _colorFor(ele.data('label')),
             'label':            'data(label)',
             'color':            '#F1F5F9',
             'font-size':        '9px',
