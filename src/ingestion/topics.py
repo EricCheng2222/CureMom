@@ -307,6 +307,30 @@ TOPICS: list[IngestionTopic] = [
         priority=1,
     ),
 
+    # ── Common pediatric / family-medicine complaints ──────────────────────
+    # Mom-friendly use case: flu, colds, fever, cough, runny nose, GI bugs.
+    # Three buckets so each topic stays under ~150K and per-topic progress
+    # is visible. Bronchiolitis and pharyngitis fold into the respiratory
+    # bucket; nausea / gastroenteritis fold into the GI bucket.
+    IngestionTopic(
+        name="respiratory_viral_common",
+        mesh_query='"Influenza, Human"[MeSH] OR "Common Cold"[MeSH] OR "Cough"[MeSH] OR "Rhinitis"[MeSH] OR "Pharyngitis"[MeSH] OR "Bronchiolitis, Viral"[MeSH]',
+        description="Common respiratory illness — flu, colds, cough, runny nose, sore throat, bronchiolitis",
+        priority=1,
+    ),
+    IngestionTopic(
+        name="fever_general",
+        mesh_query='"Fever"[MeSH]',
+        description="Fever — workup, antipyretics, pediatric fever, infectious causes",
+        priority=1,
+    ),
+    IngestionTopic(
+        name="gi_acute_symptoms",
+        mesh_query='"Diarrhea"[MeSH] OR "Vomiting"[MeSH] OR "Gastroenteritis"[MeSH] OR "Nausea"[MeSH]',
+        description="Acute GI symptoms — diarrhea, vomiting, gastroenteritis, nausea",
+        priority=1,
+    ),
+
     IngestionTopic(
         name="skin_barrier_function",
         mesh_query='("Filaggrin Proteins"[MeSH] OR "Loricrin"[Title/Abstract] OR "Transglutaminases"[MeSH] OR "Stratum Corneum"[Title/Abstract]) AND ("skin"[MeSH] OR "epidermis"[MeSH])',
