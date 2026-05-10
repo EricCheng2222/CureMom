@@ -339,6 +339,49 @@ def query(
     return output
 
 
+def _with_heartbeat(source, interval_s: float = 15.0):
+    """Wrap a sync generator so the stream emits an SSE comment every
+    `interval_s` seconds during gaps. Without this, localhost.run /
+    Cloudflare / nginx kill the TCP connection during long silent stages
+    (e.g. a 60s LLM call between `synthesizing` and `verifying`), and
+    the browser fetch throws "Load failed."
+
+    The source generator runs on a daemon thread; the main loop here
+    pumps real items as they arrive and falls back to a heartbeat when
+    the queue is idle. Comments (lines starting with `:`) are valid SSE
+    and ignored by clients.
+    """
+    import queue
+    import threading
+
+    q: "queue.Queue" = queue.Queue()
+    DONE = object()
+
+    def _producer() -> None:
+        try:
+            for chunk in source:
+                q.put(("item", chunk))
+        except BaseException as exc:   # noqa: BLE001
+            q.put(("exc", exc))
+        finally:
+            q.put((DONE, None))
+
+    t = threading.Thread(target=_producer, daemon=True)
+    t.start()
+
+    while True:
+        try:
+            kind, payload = q.get(timeout=interval_s)
+        except queue.Empty:
+            yield ": keepalive\n\n"
+            continue
+        if kind is DONE:
+            return
+        if kind == "exc":
+            raise payload
+        yield payload
+
+
 @app.post("/api/v1/query/stream")
 def query_stream(
     req: QueryRequest,
@@ -465,7 +508,7 @@ def query_stream(
             yield evt("error", detail=f"{type(exc).__name__}: {exc}", status=502)
 
     return StreamingResponse(
-        gen(),
+        _with_heartbeat(gen(), interval_s=15),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
