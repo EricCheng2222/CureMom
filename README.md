@@ -20,7 +20,7 @@ PubMed API                   ChEMBL API (no key required)
         ↓
   Hybrid Retrieval (BM25 → BM25+dense → HippoRAG PPR)
         ↓
-  Swappable LLM Layer (extractive / Ollama / Claude / OpenAI)
+  Swappable LLM Layer (extractive / Anthropic Claude / OpenAI / NVIDIA NIM)
         ↓
   FastAPI → structured JSON response + passage-level citations
 ```
@@ -28,16 +28,16 @@ PubMed API                   ChEMBL API (no key required)
 **Phases (current state):**
 - **Phase 1** ✅ live — BM25 retrieval, extractive responses, no LLM required
 - **Phase 2** ✅ live — section-aware chunking + PubMedBERT (768-dim) embeddings on **all 866K chunks** (abstract + intro/methods/results/discussion from 34,596 OA full-text papers), HuggingFace transformer NER (`d4data/biomedical-ner-all`) over **1.23M entities**, HNSW vector index built
-- **Phase 3** ✅ live — pluggable LLM with per-request model selection in the UI (Ollama dropdown auto-populated with installed models), patient-mode prompt with clickable follow-up suggestions, query-complexity classifier, citation verifier (catches hallucinated `[N]` indices and weakly-supported claims), `/llm/status` health endpoint
+- **Phase 3** ✅ live — pluggable LLM (Anthropic Claude / OpenAI / NVIDIA NIM / extractive) with per-request model selection in the UI; the dropdown auto-populates from `/llm/status` based on which API keys are configured. Patient-mode prompt with clickable follow-up suggestions, query-complexity classifier, citation verifier (catches hallucinated `[N]` indices and weakly-supported claims).
 - **Phase 4** ✅ live — HippoRAG Personalized PageRank over a **5.27M-edge entity graph** (built from MeSH descriptors merged with NER co-occurrences), SPLADE sparse-vector pipeline ready to encode
 - **Drug reference layer** ✅ live — **1,719 FDA drug labels** (openFDA) + Wikipedia fallback for older/discontinued drugs. An LLM query analyzer routes each request: drug-name questions trigger a forward FDA lookup; effect/condition questions ("drugs for muscle relaxation") trigger reverse FTS with LLM-expanded clinical synonyms.
 - **Multi-turn conversation** ✅ live — patient chat sends a rolling history (last 6 turns) with each request. Past Q+A appear bare (no [N] markers, no boilerplate, no drug cards re-injected); only the current turn carries full retrieval context. Pronouns ("its side effects") resolve via the analyzer + retrieval-side query fusion.
-- **Live knowledge-graph panel** ✅ live — split-page chat with a Cytoscape.js canvas on the right that grows turn-by-turn. The LLM emits directed relations from the question+answer; each unique subject/object becomes a node. Grounding accepts labels that overlap an NER hit OR appear as a substring of the answer text (the answer is the authoritative source). Vague predicates ("is managed by", "involves") and generic single-word labels ("protein", "RNA") are dropped server-side. Web-like fcose layout, pan/zoom/fit controls, click popover with citation pills + "Ask about this" + "Remove" buttons, **Merge** button calls the LLM to dedup equivalent entities ("B-cell" ≡ "B cell" ≡ "B cells"). The QA dropdown choice drives graph extraction too — pick `claude` and both the answer and the graph go through Anthropic; pick `ollama/<model>` and both go through that Ollama model.
+- **Live knowledge-graph panel** ✅ live — split-page chat with a Cytoscape.js canvas on the right that grows turn-by-turn. The LLM emits directed relations from the question + answer plus a `types` map classifying each concept into Drug / Disease / Gene / Anatomy / Symptom / Other; each unique subject/object becomes a node, colored by type to match the legend. Grounding: labels must appear as a substring of the answer text (answer is the authoritative source). Vague predicates ("is managed by", "involves") and generic single-word labels ("protein", "RNA") are dropped server-side. Web-like fcose layout, pan/zoom/fit controls, **node-search** input, click popover with citation pills + "Ask about this" + "Remove", **Merge** button calls the LLM to dedup equivalent entities ("B-cell" ≡ "B cell" ≡ "B cells"). The QA dropdown choice drives graph extraction + dedup: pick `claude` and the whole pipeline goes through Anthropic; pick `nim` and it goes through NVIDIA NIM (free tier MiniMax-M2.7).
 - **Ichthyosis corpus** ✅ ingested — 15,613 papers across 7 ichthyosis-related MeSH topics (core, lamellar, X-linked, harlequin/EHK, genetics, treatment, skin barrier biology). Embedding/NER/full-text pipelines running.
 
 **Default retrieval strategy:** `full` = BM25 + dense + HippoRAG PPR rerank.
 
-**Default LLM provider:** `ollama/medgemma:4b` (medical-tuned 4B model, 32K context). Configurable via `OLLAMA_MODEL` env or per-request from the dropdown.
+**Default LLM provider:** `nim/minimaxai/minimax-m2.7` (NVIDIA NIM free tier, ~40 RPM cap). Falls back to `claude` (Haiku 4.5) or `openai` (gpt-4o) if those keys are configured. Per-request override via the dropdown in the UI. Configure via `LLM_PROVIDER`, `NVIDIA_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` in `.env`.
 
 ---
 
@@ -232,8 +232,9 @@ on top of BM25) or `"full"` (BM25 + dense + HippoRAG combined — the default).
 ```bash
 curl -X POST http://localhost:8000/api/v1/query \
   -H 'Content-Type: application/json' \
+  -H 'X-API-Key: <your-key>' \
   -d '{"query":"What drugs target the complement pathway in lupus nephritis?",
-       "options":{"retrieval_strategy":"full","top_k":10,"llm_provider":"ollama"}}'
+       "options":{"retrieval_strategy":"full","top_k":20,"llm_provider":"nim"}}'
 ```
 
 Multi-hop questions like the example above benefit most from `hipporag`/`full`
@@ -280,6 +281,7 @@ existing ES doc. ~2 hours for 33K papers on M-series MPS.
 ```bash
 curl -X POST http://localhost:8000/api/v1/query \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: <your-key>" \
   -d '{
     "query": "What is the efficacy of hydroxychloroquine in SLE?",
     "query_type": "factual",
@@ -288,9 +290,9 @@ curl -X POST http://localhost:8000/api/v1/query \
       "publication_types": ["Randomized Controlled Trial", "Meta-Analysis"]
     },
     "options": {
-      "top_k": 10,
+      "top_k": 20,
       "retrieval_strategy": "full",
-      "llm_provider": "ollama"
+      "llm_provider": "nim"
     }
   }'
 ```
@@ -301,7 +303,9 @@ curl -X POST http://localhost:8000/api/v1/query \
 - `hipporag` — BM25 + HippoRAG entity-graph PPR rerank (~2 s)
 - `full` — BM25 + dense + HippoRAG (default)
 
-`llm_provider` is one of `extractive` / `ollama` / `claude` / `openai`. Defaults to whatever `LLM_PROVIDER` is in `.env`.
+`llm_provider` is one of `extractive` / `claude` / `openai` / `nim`. Defaults to whatever `LLM_PROVIDER` is in `.env`. Per-request override accepts a `<provider>/<model>` form for fine-grained control (e.g. `nim/minimaxai/minimax-m2.7`, `claude/claude-haiku-4-5-20251001`).
+
+All write endpoints (`/query`, `/graph_extract`, `/graph_dedup`, `/keys/*`) require an `X-API-Key` header. See **Public deployment** below.
 
 **Response structure:**
 ```json
@@ -386,19 +390,69 @@ Set `LLM_PROVIDER` in `.env`:
 
 | Value | Description | Requirements |
 |---|---|---|
-| `extractive` | No LLM — returns top sentences with citations | None (default) |
-| `ollama` | Local LLM via Ollama | Ollama running + model pulled |
-| `claude` | Anthropic Claude API | `ANTHROPIC_API_KEY` |
-| `openai` | OpenAI API | `OPENAI_API_KEY` |
+| `extractive` | No LLM — returns top sentences with citations | None (always works) |
+| `nim` | NVIDIA NIM (OpenAI-compatible, free tier) | `NVIDIA_API_KEY`; default model `minimaxai/minimax-m2.7` (set via `NIM_MODEL`) |
+| `claude` | Anthropic Claude API | `ANTHROPIC_API_KEY`; default model Haiku 4.5 (set via `CLAUDE_MODEL`) |
+| `openai` | OpenAI API | `OPENAI_API_KEY`; default `gpt-4o` (set via `OPENAI_MODEL`) |
 
-**Ollama setup:**
+LLM providers can also be specified per request via `options.llm_provider` in the query body, or picked from the dropdown in the UI (auto-populated from `/llm/status`). The same dropdown choice drives graph extraction and graph dedup so the answer + the knowledge graph + the merge come from one model.
+
+The drug-aware query analyzer always uses Claude Haiku for speed and JSON reliability, regardless of the QA dropdown choice.
+
+---
+
+## Public Deployment
+
+The app is designed to run behind a Cloudflare Tunnel with an API-key gate.
+
+### 1. API-key auth
+
+`/query`, `/graph_extract`, `/graph_dedup`, and `/keys/*` all require `X-API-Key`. Two-tier key model:
+
+- **Admin keys** can mint unlimited child keys via `POST /api/v1/keys/generate`.
+- **Each non-admin key** can mint exactly one child key (good for friend-of-a-friend invitations without unbounded fan-out).
+
+Bootstrap (one-time):
+
 ```bash
-# Install Ollama: https://ollama.com
-ollama pull meditron       # medical fine-tune of Llama (~4 GB)
-# Set in .env: LLM_PROVIDER=ollama, OLLAMA_MODEL=meditron
+PYTHONPATH=. python3 -c "
+import psycopg, os
+from src.api.auth import init_keys_table, bootstrap_admin_key
+dsn = f\"postgresql://{os.environ['POSTGRES_USER']}:{os.environ['POSTGRES_PASSWORD']}@localhost:5432/{os.environ['POSTGRES_DB']}\"
+with psycopg.connect(dsn) as conn:
+    init_keys_table(conn)
+    print('ADMIN_KEY:', bootstrap_admin_key(conn))
+"
 ```
 
-LLM providers can also be specified per request via `options.llm_provider` in the query body.
+The admin key prints to stdout once. Save it. To pin a specific value across restarts, set `INITIAL_ADMIN_KEY` in `.env` before the first run. Keys live in the `api_keys` table; revoke a key by `UPDATE api_keys SET is_revoked = TRUE WHERE id = X`.
+
+The frontend prompts for an API key on first use, stores it in `localStorage`, and sends `X-API-Key` automatically. The "Share access" button in the consumer sidebar mints a child key.
+
+### 2. Cloudflare Tunnel (named, free)
+
+Quick (`cloudflared tunnel --url http://localhost:8000`) gives an ephemeral `*.trycloudflare.com` URL with no signup, but the URL changes every restart. For a stable URL:
+
+```bash
+brew install cloudflared
+
+# 1. Sign in (browser opens; uses a free Cloudflare account)
+cloudflared tunnel login
+
+# 2. Create the tunnel — generates a credentials JSON in ~/.cloudflared/
+cloudflared tunnel create curemom
+
+# 3. Run it (URL form: bypasses config file, sufficient for our case)
+cloudflared tunnel run --url http://localhost:8000 curemom
+```
+
+Cloudflare prints a `*.cfargotunnel.com` URL. Pair it with a domain via `cloudflared tunnel route dns curemom curemom.example.com` to get a clean URL. Optionally add **Cloudflare Access** (free for ≤50 users) for an SSO layer in front of the API key gate.
+
+### 3. Operational notes
+
+- The `.env` file (with API keys) never leaves the host machine — it's gitignored and read by uvicorn directly.
+- The `/llm/status` endpoint is **not** auth-gated — it's used by the frontend to populate the provider dropdown before the user enters a key. It only reports availability + model strings, never key material.
+- Without an admin Cloudflare account, you can fall back to `cloudflared tunnel --url http://localhost:8000` for ephemeral access.
 
 ---
 
@@ -513,10 +567,12 @@ See [`TODO.md`](TODO.md) for the full task list.
 **Done:**
 - ✅ **Phase 1:** BM25 retrieval + extractive responses + citation provenance
 - ✅ **Phase 2 (code):** PubMedBERT embedder + section-aware chunking; HF transformer NER (`d4data/biomedical-ner-all`); RRF hybrid path wired
-- ✅ **Phase 3:** Pluggable LLM (extractive / Ollama / Claude / OpenAI); `[N]` citation parser; query classifier; citation verifier; `/llm/status` health endpoint
-- ✅ **Phase 4:** HippoRAG entity graph (5.27M edges from MeSH + NER co-occurrence) with NetworkX Personalized PageRank rerank — no Neo4j; SPLADE sparse-vector pipeline ready
-- ✅ **Live knowledge-graph panel:** Cytoscape.js canvas; relations-only LLM extraction with answer-text grounding; web-like fcose layout; click popover with Ask/Remove; **Merge** button for LLM-driven dedup of equivalent entities; provider dispatch — picks Anthropic/OpenAI/Ollama based on QA dropdown
-- ✅ **Ichthyosis corpus ingested:** 15,613 papers across 7 ichthyosis MeSH topics
+- ✅ **Phase 3:** Cloud-only LLM dispatch (extractive / Anthropic Claude / OpenAI / NVIDIA NIM); `[N]` citation parser; query classifier (Claude Haiku); citation verifier; `/llm/status` health endpoint
+- ✅ **Phase 4:** HippoRAG entity graph (~5M+ edges from MeSH + NER co-occurrence) with NetworkX Personalized PageRank rerank — no Neo4j; SPLADE sparse-vector pipeline ready
+- ✅ **Live knowledge-graph panel:** Cytoscape.js canvas; relations-only LLM extraction with answer-text grounding (no NER at query time); web-like fcose layout; type-based node coloring (Drug / Disease / Gene / Anatomy / Symptom / Other); click popover with Ask/Remove; **Merge** button for LLM-driven dedup of equivalent entities; **node search** in the topbar; provider dispatch — picks Anthropic / OpenAI / NIM based on the QA dropdown
+- ✅ **Adaptive retrieval top-k:** retriever pulls a 100-candidate pool and returns top 10% (floor 5, cap 20) instead of a fixed top-k=10/12; broad queries get more chunks, narrow factual lookups get fewer
+- ✅ **Public-deployment auth:** X-API-Key on /query / /graph_extract / /graph_dedup; admin keys mint unlimited child keys, each non-admin key mints exactly one. Bootstrap admin key created on first run via `auth.bootstrap_admin_key`.
+- ✅ **Corpora ingested:** SLE + muscle physiology + ichthyosis (15,613 papers, 7 MeSH topics) + creatine (10,432 papers, pharmacology + clinical)
 
 **Pending offline runs (heavy compute):**
 - Run `scripts/embed.py` — generate 768-dim PubMedBERT vectors over chunks (~1 hr); enables real `hybrid` and `full` strategies (currently degrade to BM25 + HippoRAG)
