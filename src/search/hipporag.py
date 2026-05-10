@@ -297,8 +297,11 @@ class HippoRAGRetriever:
     has run on new ingested papers — the pickle is rebuilt fresh.
     """
 
-    _PICKLE_PATH = Path("data/hipporag_graph.pkl")
-    _META_PATH = Path("data/hipporag_graph.meta.json")
+    # Absolute paths anchored to the repo root (parent of src/) so the cache
+    # is found regardless of which CWD the importer runs in.
+    _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+    _PICKLE_PATH = _REPO_ROOT / "data" / "hipporag_graph.pkl"
+    _META_PATH = _REPO_ROOT / "data" / "hipporag_graph.meta.json"
 
     def __init__(self, db_dsn: str, min_edge_weight: int = 2) -> None:
         self._db_dsn = db_dsn
@@ -315,23 +318,23 @@ class HippoRAGRetriever:
             )
             return int(cur.fetchone()[0])
 
-    def _try_load_pickle(self, expected_edges: int):
+    def _try_load_pickle(self, expected_rows: int):
         """Return the unpickled graph if cache is valid, else None.
 
-        Strict edge-count match. Drift is not expected because
-        `entity_graph` is only written by `scripts/build_entity_graph.py`,
-        which now saves the pickle itself as its final step. If the
-        counts differ here, something genuinely changed (re-ingest,
-        manual SQL, etc.) and we should rebuild.
+        Validator compares Postgres ROW count vs the row count
+        recorded in meta at last build (NOT NetworkX edge count —
+        NX dedupes (a,b)/(b,a) and self-loops, so graph.number_of_edges()
+        is always ≤ table COUNT(*)).
         """
         if not (self._PICKLE_PATH.exists() and self._META_PATH.exists()):
             return None
         try:
             meta = json.loads(self._META_PATH.read_text())
-            if meta.get("edge_count") != expected_edges:
+            cached_rows = meta.get("source_row_count")
+            if cached_rows != expected_rows:
                 logger.info(
-                    "HippoRAG pickle stale (cached=%s, live=%d) — will rebuild",
-                    meta.get("edge_count"), expected_edges,
+                    "HippoRAG pickle stale (cached_rows=%s, live_rows=%d) — will rebuild",
+                    cached_rows, expected_rows,
                 )
                 return None
             if meta.get("min_edge_weight") != self._min_edge_weight:
@@ -350,7 +353,16 @@ class HippoRAGRetriever:
             logger.warning("HippoRAG pickle unreadable (%s) — will rebuild", exc)
             return None
 
-    def _save_pickle(self, graph) -> None:
+    def _save_pickle(self, graph, source_row_count: int) -> None:
+        """Persist the graph + a meta sidecar.
+
+        `source_row_count` is the Postgres row count of qualifying edges
+        AT THE MOMENT the rebuild started — NOT graph.number_of_edges().
+        These two are not equal because NetworkX dedupes (a,b)/(b,a)
+        rows and self-loops, so the graph has fewer edges than the table
+        has rows. The validator compares Postgres-row-count to
+        Postgres-row-count, which is the only apples-to-apples check.
+        """
         try:
             self._PICKLE_PATH.parent.mkdir(parents=True, exist_ok=True)
             t0 = time.monotonic()
@@ -377,13 +389,14 @@ class HippoRAGRetriever:
                 pf = _ProgressFile(raw)
                 pickle.dump(graph, pf, protocol=pickle.HIGHEST_PROTOCOL)
             self._META_PATH.write_text(json.dumps({
-                "edge_count": graph.number_of_edges(),
+                "source_row_count": source_row_count,
+                "graph_edge_count": graph.number_of_edges(),
                 "node_count": graph.number_of_nodes(),
                 "min_edge_weight": self._min_edge_weight,
             }))
             logger.info(
-                "Saved HippoRAG pickle: %d edges, %.1f MB in %.1fs",
-                graph.number_of_edges(),
+                "Saved HippoRAG pickle: %d Postgres rows → %d NetworkX edges, %.1f MB in %.1fs",
+                source_row_count, graph.number_of_edges(),
                 self._PICKLE_PATH.stat().st_size / 1_000_000,
                 time.monotonic() - t0,
             )
@@ -445,7 +458,7 @@ class HippoRAGRetriever:
             self._graph.number_of_nodes(), self._graph.number_of_edges(),
             time.monotonic() - t0,
         )
-        self._save_pickle(self._graph)
+        self._save_pickle(self._graph, source_row_count=live_edges)
         self._loaded = True
 
     def reload(self) -> None:
