@@ -178,6 +178,14 @@
               <option value="extractive">Extractive (fast)</option>
             </select>
           </label>
+          <label class="ctrl-label">Strategy:
+            <select id="consumer-strategy" class="ctrl-select" title="Retrieval strategy">
+              <option value="full" selected>Full (BM25 + dense + graph)</option>
+              <option value="hybrid">Hybrid (BM25 + dense)</option>
+              <option value="bm25">BM25 (keyword, fastest)</option>
+              <option value="hipporag">HippoRAG (BM25 + graph)</option>
+            </select>
+          </label>
         </div>
       </div>
     </div>
@@ -339,6 +347,6 @@
 </div>
 
 <script src="graph.js?v=10"></script>
-<script src="app.js?v=22"></script>
+<script src="app.js?v=23"></script>
 </body>
 </html>

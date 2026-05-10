@@ -698,13 +698,14 @@ async function sendConsumerMessage() {
   try {
     const provider = document.getElementById('consumer-provider').value;
     const simple   = document.getElementById('consumer-simple').checked;
+    const strategy = document.getElementById('consumer-strategy')?.value || 'full';
 
     const r = await apiFetch(`${API}/api/v1/query/stream`, {
       method: 'POST',
       headers: { 'Accept': 'text/event-stream' },
       body: JSON.stringify({
         query,
-        options: { top_k: 12, retrieval_strategy: 'full', llm_provider: provider, plain_language: simple },
+        options: { top_k: 12, retrieval_strategy: strategy, llm_provider: provider, plain_language: simple },
         history: chatHistory.slice(-MAX_HISTORY_TURNS * 2),  // last N user+assistant pairs
       }),
     });
