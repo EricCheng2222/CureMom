@@ -694,8 +694,9 @@ async function sendConsumerMessage() {
     const provider = document.getElementById('consumer-provider').value;
     const simple   = document.getElementById('consumer-simple').checked;
 
-    const r = await apiFetch(`${API}/api/v1/query`, {
+    const r = await apiFetch(`${API}/api/v1/query/stream`, {
       method: 'POST',
+      headers: { 'Accept': 'text/event-stream' },
       body: JSON.stringify({
         query,
         options: { top_k: 12, retrieval_strategy: 'full', llm_provider: provider, plain_language: simple },
@@ -703,14 +704,56 @@ async function sendConsumerMessage() {
       }),
     });
 
-    removeTypingBubble(typing);
-    if (!r.ok) {
+    if (!r.ok || !r.body) {
+      removeTypingBubble(typing);
       const err = await r.json().catch(() => ({}));
       appendAIBubble(`Sorry, I couldn't get a response. ${_formatErr(err, r)}`, []);
       console.error('[query] HTTP', r.status, err);
       return;
     }
-    const data = await r.json();
+
+    // Stream SSE events. Each event payload looks like:
+    //   data: {"stage": "<name>", ...}\n\n
+    // We update the typing-bubble label as stages arrive; the final
+    // 'complete' event carries the full result payload.
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let data = null;
+    let errEvent = null;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const events = buffer.split('\n\n');
+      buffer = events.pop() || '';
+      for (const raw of events) {
+        const line = raw.split('\n').find(l => l.startsWith('data: '));
+        if (!line) continue;
+        let obj;
+        try { obj = JSON.parse(line.slice(6)); } catch { continue; }
+        if (obj.stage === 'complete') {
+          data = obj.result;
+        } else if (obj.stage === 'error') {
+          errEvent = obj;
+        } else {
+          _setTypingStage(typing, obj);
+        }
+      }
+    }
+
+    removeTypingBubble(typing);
+
+    if (errEvent) {
+      appendAIBubble(`Sorry, I couldn't get a response. ${errEvent.detail || 'unknown error'}`, []);
+      console.error('[query/stream] error event:', errEvent);
+      return;
+    }
+    if (!data) {
+      appendAIBubble('No response returned (stream ended without a complete event).', []);
+      return;
+    }
     const response = data.response ?? 'No response returned.';
     appendAIBubble(response, data.citations ?? []);
     // Successful authed call — first-time visitors should now see the Share section.
@@ -739,17 +782,19 @@ function appendUserBubble(text) {
   scrollChat();
 }
 
-// Stage labels cycle as the user waits, so they get a subtle hint about
-// which step is taking time instead of staring at three dots forever.
-// Timings are approximate — tuned to typical NIM/Claude /full pipeline
-// (analyze → drug lookup → retrieve → rerank → LLM synthesis).
-const _TYPING_STAGES = [
-  { atMs:     0, label: 'Analyzing your question…' },
-  { atMs:  2500, label: 'Searching the literature…' },
-  { atMs:  6000, label: 'Reading and ranking sources…' },
-  { atMs: 12000, label: 'Composing the answer…' },
-  { atMs: 60000, label: 'Long answers can take a minute or two — still working…' },
-];
+// Stage labels are driven by real SSE events from /api/v1/query/stream
+// (server emits {stage:"analyzing"|"embedding"|"loading_graph"|"retrieving"|
+// "drug_lookup"|"synthesizing"|"verifying"|"complete"}) so the user sees
+// where the backend actually is, not where the wall clock guesses it is.
+const _STAGE_LABELS = {
+  analyzing:     'Analyzing your question…',
+  embedding:     'Embedding query for dense search…',
+  loading_graph: 'Loading the entity graph (one-time)…',
+  retrieving:    'Searching the literature…',
+  drug_lookup:   'Looking up drug references…',
+  synthesizing:  'Composing the answer…',
+  verifying:     'Verifying citations…',
+};
 
 function appendTypingBubble() {
   const msgs = document.getElementById('chat-messages');
@@ -761,28 +806,25 @@ function appendTypingBubble() {
     </div>
     <div class="msg-content typing-bubble">
       <div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div>
-      <div class="typing-stage" data-typing-stage>${_TYPING_STAGES[0].label}</div>
+      <div class="typing-stage" data-typing-stage>Connecting…</div>
     </div>`;
   msgs.appendChild(d);
-
-  // Drive the stage label off the wall clock; stop on remove.
-  const start = Date.now();
-  const stageEl = d.querySelector('[data-typing-stage]');
-  d._stageTimer = setInterval(() => {
-    const elapsed = Date.now() - start;
-    let pick = _TYPING_STAGES[0];
-    for (const s of _TYPING_STAGES) if (elapsed >= s.atMs) pick = s;
-    if (stageEl && stageEl.textContent !== pick.label) stageEl.textContent = pick.label;
-  }, 500);
-
   scrollChat();
   return d;
 }
 
-function removeTypingBubble(el) {
-  if (el && el._stageTimer) clearInterval(el._stageTimer);
-  el?.remove();
+function _setTypingStage(bubbleEl, evt) {
+  const stageEl = bubbleEl?.querySelector('[data-typing-stage]');
+  if (!stageEl) return;
+  const base = _STAGE_LABELS[evt.stage] || evt.stage;
+  // Decorate "synthesizing" with the model so users know which provider is working.
+  const label = (evt.stage === 'synthesizing' && evt.model)
+    ? `Composing the answer with ${evt.model}…`
+    : base;
+  stageEl.textContent = label;
 }
+
+function removeTypingBubble(el) { el?.remove(); }
 
 function appendAIBubble(text, citations) {
   const msgs = document.getElementById('chat-messages');

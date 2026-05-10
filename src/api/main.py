@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
@@ -22,7 +23,7 @@ from elasticsearch import Elasticsearch
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from psycopg.rows import dict_row
 from pydantic import BaseModel, Field
 
@@ -336,6 +337,142 @@ def query(
     if drug_card_names:
         output["metadata"]["drug_cards"] = drug_card_names
     return output
+
+
+@app.post("/api/v1/query/stream")
+def query_stream(
+    req: QueryRequest,
+    retriever: Annotated[HybridRetriever, Depends(get_retriever)],
+    _key: Annotated[KeyRecord, Depends(require_api_key)] = None,
+) -> StreamingResponse:
+    """Same pipeline as /query, but emits Server-Sent Events at each
+    stage boundary so the frontend can show real progress instead of a
+    time-based guess.
+
+    Stages emitted (in order):
+      analyzing → drug_lookup? → embedding? → loading_graph? →
+      retrieving → synthesizing → verifying → complete
+
+    Optional stages depend on retrieval_strategy and provider.
+    """
+    def evt(stage: str, **extra: Any) -> str:
+        return f"data: {json.dumps({'stage': stage, **extra})}\n\n"
+
+    def gen():
+        try:
+            start = time.monotonic()
+
+            yield evt("analyzing")
+            filter_dict = req.filters.model_dump(exclude_none=False)
+            strategy = req.options.retrieval_strategy
+            dense_weight = 0.5 if strategy in ("hybrid", "full") else 0.0
+            use_hipporag = strategy in ("hipporag", "full")
+            query_embedding: list[float] | None = None
+
+            effective_query = req.query
+            if req.history:
+                prior_user_terms = " ".join(
+                    m.content for m in req.history[-6:] if m.role == "user"
+                )
+                if prior_user_terms:
+                    effective_query = f"{prior_user_terms} {req.query}"
+
+            if dense_weight > 0:
+                yield evt("embedding")
+                global _embedder
+                if _embedder is None:
+                    from ..embeddings.chunk_pipeline import _Embedder
+                    logger.info("Loading PubMedBERT for hybrid retrieval (one-time)…")
+                    _embedder = _Embedder()
+                query_embedding = _embedder.encode([effective_query])[0]
+
+            if use_hipporag:
+                global _hipporag
+                if _hipporag is None:
+                    yield evt("loading_graph")
+                    from ..search.hipporag import HippoRAGRetriever
+                    logger.info("Loading HippoRAG entity graph (one-time)…")
+                    _hipporag = HippoRAGRetriever(DB_DSN)
+                    _hipporag._ensure_loaded()
+                    if _hipporag._graph is None or _hipporag._graph.number_of_edges() == 0:
+                        yield evt("error", detail="entity_graph table is empty — run scripts/build_entity_graph.py", status=502)
+                        return
+                retriever._hipporag = _hipporag
+
+            yield evt("retrieving")
+            chunks = retriever.retrieve(
+                query=effective_query,
+                filters=filter_dict,
+                top_k=req.options.top_k,
+                dense_weight=dense_weight,
+                query_embedding=query_embedding,
+                use_hipporag=use_hipporag,
+            )
+
+            if not chunks:
+                yield evt("complete", result={
+                    "query": req.query,
+                    "response": "No relevant papers were found for this query.",
+                    "citations": [],
+                    "metadata": {"retrieval_strategy": strategy, "model_used": "none"},
+                })
+                return
+
+            yield evt("drug_lookup")
+            drug_cards: list[str] = []
+            drug_card_names: list[str] = []
+            try:
+                with psycopg.connect(DB_DSN) as drug_conn:
+                    cards = lookup_drugs_for_query(drug_conn, effective_query, max_drugs=3)
+                    for c in cards:
+                        drug_cards.append(c.to_text())
+                        drug_card_names.append(f"{c.name} ({c.source})")
+            except Exception as exc:
+                logger.warning("Drug lookup failed (%s); continuing.", exc)
+
+            provider = get_provider(req.options.llm_provider)
+            yield evt("synthesizing", model=provider.name)
+            history_dicts = [{"role": m.role, "content": m.content} for m in req.history]
+            synthesis = provider.synthesize(
+                req.query, chunks,
+                plain_language=req.options.plain_language,
+                drug_cards=drug_cards or None,
+                history=history_dicts or None,
+            )
+
+            yield evt("verifying")
+            result = build_response(
+                query=req.query, chunks=chunks,
+                response_text=synthesis.response_text,
+                cited_chunk_ids=synthesis.cited_chunk_ids,
+                model_used=synthesis.model_used,
+                retrieval_strategy=strategy,
+            )
+            output = response_to_dict(result)
+            output["metadata"]["latency_ms"] = int((time.monotonic() - start) * 1000)
+            classification = classify_query(req.query)
+            output["metadata"]["query_type"] = classification.query_type
+            citation_warnings = verify_citations(synthesis.response_text, chunks)
+            if citation_warnings:
+                output["metadata"]["citation_warnings"] = warnings_to_dicts(citation_warnings)
+            if drug_card_names:
+                output["metadata"]["drug_cards"] = drug_card_names
+
+            yield evt("complete", result=output)
+
+        except Exception as exc:
+            logger.exception("query/stream pipeline failed")
+            yield evt("error", detail=f"{type(exc).__name__}: {exc}", status=502)
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",   # disable proxy buffering (Cloudflare/nginx)
+            "Connection": "keep-alive",
+        },
+    )
 
 
 @app.post("/api/v1/graph_extract")
