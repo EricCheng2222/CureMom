@@ -21,6 +21,10 @@ env/
 # Data (raw downloads — too large for git)
 data/raw/
 data/downloads/
+# HippoRAG entity-graph cache (rebuilt automatically when entity_graph
+# row count changes; never check in)
+data/hipporag_graph.pkl
+data/hipporag_graph.meta.json
 
 # IDE
 .vscode/

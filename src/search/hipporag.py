@@ -16,9 +16,13 @@ chunk mentions all three.
 
 from __future__ import annotations
 
+import json
 import logging
+import pickle
+import time
 from collections import defaultdict
 from dataclasses import dataclass
+from pathlib import Path
 
 import psycopg
 from psycopg.rows import dict_row
@@ -281,13 +285,83 @@ def build_entity_graph(conn: psycopg.Connection, batch_size: int = 5000) -> int:
 
 
 class HippoRAGRetriever:
-    """In-memory entity graph + PPR retrieval."""
+    """In-memory entity graph + PPR retrieval.
+
+    The graph is cached to disk as a pickle so uvicorn reloads don't
+    pay the multi-minute Postgres-rehydration cost on every restart.
+
+    Pickle invalidation is automatic: we compare the edge count
+    embedded in the meta sidecar against `SELECT COUNT(*) FROM
+    entity_graph WHERE co_occurrences >= min_edge_weight`. If they
+    differ — which they will after `scripts/build_entity_graph.py`
+    has run on new ingested papers — the pickle is rebuilt fresh.
+    """
+
+    _PICKLE_PATH = Path("data/hipporag_graph.pkl")
+    _META_PATH = Path("data/hipporag_graph.meta.json")
 
     def __init__(self, db_dsn: str, min_edge_weight: int = 2) -> None:
         self._db_dsn = db_dsn
         self._min_edge_weight = min_edge_weight
         self._graph = None
         self._loaded = False
+
+    def _live_edge_count(self) -> int:
+        """Count of qualifying edges in the live entity_graph table."""
+        with psycopg.connect(self._db_dsn) as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM entity_graph WHERE co_occurrences >= %s",
+                (self._min_edge_weight,),
+            )
+            return int(cur.fetchone()[0])
+
+    def _try_load_pickle(self, expected_edges: int):
+        """Return the unpickled graph if cache is valid, else None."""
+        if not (self._PICKLE_PATH.exists() and self._META_PATH.exists()):
+            return None
+        try:
+            meta = json.loads(self._META_PATH.read_text())
+            if meta.get("edge_count") != expected_edges:
+                logger.info(
+                    "HippoRAG pickle stale (cached=%d, live=%d) — will rebuild",
+                    meta.get("edge_count", -1), expected_edges,
+                )
+                return None
+            if meta.get("min_edge_weight") != self._min_edge_weight:
+                logger.info("HippoRAG pickle min_edge_weight differs — will rebuild")
+                return None
+            t0 = time.monotonic()
+            with self._PICKLE_PATH.open("rb") as f:
+                graph = pickle.load(f)
+            logger.info(
+                "Loaded HippoRAG graph from pickle: %d nodes, %d edges in %.1fs",
+                graph.number_of_nodes(), graph.number_of_edges(),
+                time.monotonic() - t0,
+            )
+            return graph
+        except Exception as exc:
+            logger.warning("HippoRAG pickle unreadable (%s) — will rebuild", exc)
+            return None
+
+    def _save_pickle(self, graph) -> None:
+        try:
+            self._PICKLE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            t0 = time.monotonic()
+            with self._PICKLE_PATH.open("wb") as f:
+                pickle.dump(graph, f, protocol=pickle.HIGHEST_PROTOCOL)
+            self._META_PATH.write_text(json.dumps({
+                "edge_count": graph.number_of_edges(),
+                "node_count": graph.number_of_nodes(),
+                "min_edge_weight": self._min_edge_weight,
+            }))
+            logger.info(
+                "Saved HippoRAG pickle: %d edges, %.1f MB in %.1fs",
+                graph.number_of_edges(),
+                self._PICKLE_PATH.stat().st_size / 1_000_000,
+                time.monotonic() - t0,
+            )
+        except Exception as exc:
+            logger.warning("HippoRAG pickle save failed (%s); not cached", exc)
 
     def _ensure_loaded(self) -> None:
         if self._loaded:
@@ -297,25 +371,42 @@ class HippoRAGRetriever:
         except ImportError as exc:
             raise RuntimeError("Install networkx: pip install networkx") from exc
 
-        logger.info("Loading entity graph into memory…")
+        # 1. Check the live edge count cheaply (one indexed COUNT).
+        live_edges = self._live_edge_count()
+
+        # 2. Try the pickle cache first.
+        cached = self._try_load_pickle(live_edges)
+        if cached is not None:
+            self._graph = cached
+            self._loaded = True
+            return
+
+        # 3. Cold path: build from Postgres, then write the pickle.
+        logger.info("Loading entity graph into memory from Postgres…")
+        t0 = time.monotonic()
         self._graph = nx.Graph()
-        with psycopg.connect(self._db_dsn) as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT entity_a, entity_b, co_occurrences FROM entity_graph "
-                    "WHERE co_occurrences >= %s",
-                    (self._min_edge_weight,),
-                )
-                for a, b, w in cur.fetchall():
-                    self._graph.add_edge(a, b, weight=w)
+        with psycopg.connect(self._db_dsn) as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT entity_a, entity_b, co_occurrences FROM entity_graph "
+                "WHERE co_occurrences >= %s",
+                (self._min_edge_weight,),
+            )
+            for a, b, w in cur.fetchall():
+                self._graph.add_edge(a, b, weight=w)
         logger.info(
-            "Loaded entity graph: %d nodes, %d edges",
+            "Loaded entity graph: %d nodes, %d edges in %.1fs",
             self._graph.number_of_nodes(), self._graph.number_of_edges(),
+            time.monotonic() - t0,
         )
+        self._save_pickle(self._graph)
         self._loaded = True
 
     def reload(self) -> None:
-        """Force a reload of the in-memory graph (after a rebuild)."""
+        """Force a reload of the in-memory graph (after a rebuild).
+
+        Doesn't delete the pickle — the live-vs-cached edge-count check
+        in _ensure_loaded handles invalidation automatically.
+        """
         self._loaded = False
         self._graph = None
 
