@@ -526,6 +526,32 @@
     };
   }
 
+  // Export the current canvas as a PNG blob. Uses cytoscape's built-in
+  // off-screen renderer so the result is the full graph, not just the
+  // visible viewport. `scale=2` for crisp output on retina displays.
+  function exportPNG(opts) {
+    if (!cy) return null;
+    const o = opts || {};
+    const bg = o.bg || getComputedStyle(document.documentElement)
+      .getPropertyValue('--graph-bg').trim() || '#ffffff';
+    return cy.png({
+      output: 'blob',
+      bg,
+      full: true,
+      scale: o.scale || 2,
+    });
+  }
+
+  // Replace current state with a previously-exported JSON payload.
+  // Clears first (no merging onto whatever's there), then layouts.
+  function restoreFromPayload(payload) {
+    if (!payload || !Array.isArray(payload.nodes)) return false;
+    clear();
+    merge(payload);
+    if (cy && cy.elements().length) cy.fit(undefined, 40);
+    return true;
+  }
+
   function size() {
     return { nodes: state.nodes.size, edges: state.edges.size };
   }
@@ -551,5 +577,5 @@
     cy.resize();
   }
 
-  window.KGraph = { init, merge, clear, removeNode, applyMergeGroups, searchNodes, exportJSON, size, onNodeClick, zoomBy, fit, resize };
+  window.KGraph = { init, merge, clear, removeNode, applyMergeGroups, searchNodes, exportJSON, exportPNG, restoreFromPayload, size, onNodeClick, zoomBy, fit, resize };
 })();

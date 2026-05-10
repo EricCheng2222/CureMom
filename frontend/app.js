@@ -301,15 +301,42 @@ function setupKnowledgeGraph() {
   document.getElementById('graph-export-btn')?.addEventListener('click', () => {
     if (!_graphInitialized) return;
     const payload = KGraph.exportJSON();
-    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `curemom-graph-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.json`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
+    _downloadBlob(
+      new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }),
+      `curemom-graph-${_timestamp()}.json`,
+    );
+  });
+  document.getElementById('graph-png-btn')?.addEventListener('click', async () => {
+    if (!_graphInitialized) return;
+    const blob = KGraph.exportPNG({ scale: 2 });
+    if (!blob) return;
+    _downloadBlob(blob, `curemom-graph-${_timestamp()}.png`);
+  });
+  document.getElementById('graph-restore-btn')?.addEventListener('click', () => {
+    document.getElementById('graph-restore-file')?.click();
+  });
+  document.getElementById('graph-restore-file')?.addEventListener('change', async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';  // allow re-selecting the same file later
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const payload = JSON.parse(text);
+      if (!payload || !Array.isArray(payload.nodes) || !Array.isArray(payload.edges)) {
+        alert('That file doesn\'t look like a CureMom graph export.');
+        return;
+      }
+      ensureGraphInit();
+      const ok = KGraph.restoreFromPayload(payload);
+      if (ok) {
+        _refreshGraphChrome();
+      } else {
+        alert('Restore failed — payload was rejected.');
+      }
+    } catch (err) {
+      console.error('[KGraph] restore failed:', err);
+      alert('Could not restore graph: ' + (err.message || err));
+    }
   });
   document.getElementById('graph-zoom-in-btn')?.addEventListener('click', () => {
     ensureGraphInit();
@@ -1205,6 +1232,21 @@ function closeModal(e) {
 }
 
 // ── Utilities ────────────────────────────────────────────────────────────────
+function _downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function _timestamp() {
+  return new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+}
+
 function escapeHtml(str) {
   if (!str) return '';
   return String(str)

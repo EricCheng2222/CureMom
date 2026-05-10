@@ -21,8 +21,8 @@
   <script src="https://unpkg.com/layout-base@2.0.1/layout-base.js" defer></script>
   <script src="https://unpkg.com/cose-base@2.2.0/cose-base.js" defer></script>
   <script src="https://unpkg.com/cytoscape-fcose@2.2.0/cytoscape-fcose.js" defer></script>
-  <script src="graph.js?v=10" defer></script>
-  <script src="app.js?v=26" defer></script>
+  <script src="graph.js?v=11" defer></script>
+  <script src="app.js?v=27" defer></script>
 </head>
 <body>
 
@@ -224,7 +224,10 @@
           <span class="graph-action-divider"></span>
           <button class="graph-action-btn" id="graph-merge-btn" title="Ask the LLM to dedup equivalent entities (e.g. B-cell ≡ B cell)">Merge</button>
           <button class="graph-action-btn" id="graph-clear-btn" title="Clear graph">Clear</button>
-          <button class="graph-action-btn" id="graph-export-btn" title="Export JSON">Export</button>
+          <button class="graph-action-btn" id="graph-export-btn" title="Export graph as JSON (re-loadable later via Restore)">Export</button>
+          <button class="graph-action-btn" id="graph-png-btn" title="Save graph as PNG image">PNG</button>
+          <button class="graph-action-btn" id="graph-restore-btn" title="Restore a previously exported graph (replaces current)">Restore</button>
+          <input type="file" id="graph-restore-file" accept="application/json,.json" style="display:none" />
         </div>
       </div>
       <div class="graph-canvas-wrap">
