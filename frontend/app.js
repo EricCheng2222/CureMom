@@ -47,8 +47,53 @@ async function onShareAccessClick() {
       (note ? `Label: ${note}\n\n` : '\n'),
       data.key,
     );
+    // Refresh the button: a non-admin who just used their one allowance
+    // should now see the disabled "limit reached" state.
+    _refreshAuthState();
   } catch (err) {
     alert('Could not mint key: ' + (err.message || err));
+  }
+}
+
+// On page load: if a key is already in localStorage, validate it via
+// /keys/me. The Share section stays hidden until we confirm the key is
+// good — visitors who haven't entered a key yet shouldn't see UI for
+// minting more keys.
+async function _refreshAuthState() {
+  const section = document.getElementById('share-section');
+  const btn = document.getElementById('share-access-btn');
+  if (!section || !btn) return;
+
+  const key = getApiKey();
+  if (!key) {
+    section.style.display = 'none';
+    return;
+  }
+  try {
+    const r = await fetch(`${API}/api/v1/keys/me`, {
+      headers: { 'X-API-Key': key },
+      signal: AbortSignal.timeout(5000),
+    });
+    if (r.status === 401) {
+      // Stored key was rejected — clear it so the next gated call re-prompts.
+      setApiKey('');
+      section.style.display = 'none';
+      return;
+    }
+    if (!r.ok) return;   // transient error; leave UI alone
+    const data = await r.json();
+    section.style.display = '';
+    if (data.can_mint_more) {
+      btn.disabled = false;
+      btn.title = data.is_admin
+        ? 'Admin: mint a new child key (unlimited)'
+        : 'Mint your one child key to share with someone else';
+    } else {
+      btn.disabled = true;
+      btn.title = 'You have already minted your one child key (admin can mint unlimited).';
+    }
+  } catch {
+    // Silent — leave hidden, will retry on next gated call success.
   }
 }
 
@@ -177,6 +222,9 @@ async function populateProviderDropdowns() {
 populateProviderDropdowns().catch(err => {
   console.error('[providers] populate failed:', err);
 });
+
+// Validate any stored key + reveal the Share section if so.
+_refreshAuthState();
 
 // ── Knowledge graph panel ───────────────────────────────────────────────────
 // The graph is session-local and grows with each Q&A turn. After every
@@ -627,6 +675,8 @@ async function sendConsumerMessage() {
     const data = await r.json();
     const response = data.response ?? 'No response returned.';
     appendAIBubble(response, data.citations ?? []);
+    // Successful authed call — first-time visitors should now see the Share section.
+    _refreshAuthState();
     // Push BOTH turns to history. The user message was already pushed in
     // appendUserBubble; here we add the assistant response as clean prose
     // (strip [N] markers + disclaimer + follow-up section).
