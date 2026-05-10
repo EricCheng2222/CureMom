@@ -491,8 +491,8 @@ class HippoRAGRetriever:
     def personalized_pagerank(
         self,
         query_entities: list[str],
-        damping: float = 0.85,
-        max_iter: int = 100,
+        damping: float = 0.9,
+        max_iter: int = 30,
         top_n: int = 50,
     ) -> dict[str, float]:
         """Run PPR seeded at query entities. Returns {entity: score}."""
