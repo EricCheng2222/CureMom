@@ -1219,6 +1219,25 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); }
   border-color: var(--red);
 }
 /* Type-specific quick actions: Cure for diseases, +/− for drugs/genes. */
+/* Persistent "not medical advice" banner above the chat input. Public
+   deployments need this front and center — the README disclaimer alone
+   isn't enough when someone's about to type a real medical question. */
+.chat-disclaimer {
+  background: rgba(251, 191, 36, 0.10);
+  border-top: 1px solid rgba(251, 191, 36, 0.35);
+  border-bottom: 1px solid rgba(251, 191, 36, 0.20);
+  color: var(--text-2, #d1d5db);
+  font-size: 11.5px;
+  line-height: 1.5;
+  padding: 8px 16px;
+  text-align: center;
+}
+.chat-disclaimer strong {
+  color: #FBBF24;
+  font-weight: 700;
+  margin-right: 6px;
+}
+
 /* Stale-tab banner: shown when a redeploy is detected on a tab that
    loaded an older app.js. Floats at the top, dismissable. */
 .stale-banner {

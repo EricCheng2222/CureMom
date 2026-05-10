@@ -1,8 +1,23 @@
 # CureMom — Medical Literature Knowledge Base
 
+> ## ⚠️ NOT MEDICAL ADVICE — RESEARCH PROTOTYPE
+>
+> **This software is an experimental research tool. Read this before using it.**
+>
+> - **Not a medical device. Not for clinical use.** Outputs are AI-generated summaries of public research papers, not professional medical opinions. **Never** make a treatment, dosing, or diagnostic decision based on what this system says. **Always consult a licensed healthcare professional** for any medical question that affects you or someone you care about.
+> - **LLM outputs can be wrong.** The synthesis layer (Anthropic Claude / OpenAI / NVIDIA NIM) can hallucinate, misread evidence, miscite papers, or omit critical contraindications. The `[N]` citation markers do not guarantee that the cited paper actually supports the claim.
+> - **The corpus is incomplete and historical.** We index a slice of PubMed/PMC at a point in time. Newer research, retractions, drug-label changes, and safety signals after that snapshot are not reflected.
+> - **Drug references come from openFDA + Wikipedia.** Coverage is not exhaustive, may be out of date, and does not include every approved indication, contraindication, or interaction. Region-specific approvals and prescribing information can differ.
+> - **No warranty.** Provided as-is, no fitness for any purpose, no liability for any decision made on the basis of its output. Logs, queries, and any data you put into a public deployment may be visible to whoever operates that deployment — treat it as **public**, not as PHI.
+> - **Drug names mentioned ≠ endorsement.** A medication appearing in an answer means the literature mentions it, not that it is appropriate, safe, or available for your situation.
+>
+> If you or someone you know may be in a medical emergency, call your local emergency number immediately.
+
+---
+
 A system that ingests peer-reviewed medical papers from PubMed/PMC and answers queries with reasoned, citation-grounded responses. Built on first-principles drug discovery: the system starts from molecular biology and discovers compound→pathway→condition connections from evidence, rather than encoding assumptions about what treats what.
 
-**Starting scope:** Systemic Lupus Erythematosus (SLE), autoimmune disease, and muscle physiology/hypertrophy.
+**Starting scope:** Systemic Lupus Erythematosus (SLE), autoimmune disease, muscle physiology/hypertrophy, ichthyosis, and creatine pharmacology + clinical evidence.
 
 ---
 
