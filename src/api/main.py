@@ -339,12 +339,17 @@ def query(
     return output
 
 
-def _with_heartbeat(source, interval_s: float = 15.0):
+def _with_heartbeat(source, interval_s: float = 3.0):
     """Wrap a sync generator so the stream emits an SSE comment every
     `interval_s` seconds during gaps. Without this, localhost.run /
-    Cloudflare / nginx kill the TCP connection during long silent stages
-    (e.g. a 60s LLM call between `synthesizing` and `verifying`), and
-    the browser fetch throws "Load failed."
+    Cloudflare / serveo / nginx kill the TCP connection during long
+    silent stages (e.g. a 30s drug_lookup hitting Wikipedia/PubChem,
+    or a 60s LLM call between `synthesizing` and `verifying`), and the
+    browser fetch throws "Load failed."
+
+    Default interval is 3 s — measured: serveo's upstream-idle timeout
+    is somewhere around 5–6 s, well under our previous 15 s heartbeat.
+    Three seconds keeps comfortable margin without flooding the wire.
 
     The source generator runs on a daemon thread; the main loop here
     pumps real items as they arrive and falls back to a heartbeat when
