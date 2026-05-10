@@ -303,6 +303,13 @@ class HippoRAGRetriever:
     _PICKLE_PATH = _REPO_ROOT / "data" / "hipporag_graph.pkl"
     _META_PATH = _REPO_ROOT / "data" / "hipporag_graph.meta.json"
 
+    # Class-level lock — serializes concurrent _ensure_loaded() calls so
+    # multiple threadpool requests don't each spawn their own pickle.load
+    # (which we observed: two threads pickle.loading the same 1.6 GB file
+    # in parallel, GIL-thrashing and turning a 60s load into 13+ min).
+    import threading as _threading_for_lock
+    _load_lock = _threading_for_lock.Lock()
+
     def __init__(self, db_dsn: str, min_edge_weight: int = 2) -> None:
         self._db_dsn = db_dsn
         self._min_edge_weight = min_edge_weight
@@ -406,6 +413,17 @@ class HippoRAGRetriever:
     def _ensure_loaded(self) -> None:
         if self._loaded:
             return
+        # Serialize concurrent loads. The 1.6 GB pickle.load is slow
+        # enough that multiple threadpool requests racing each other
+        # makes ALL of them slow due to GIL contention. With this lock
+        # the first request loads (~60-120 s), the others wait, then
+        # they all share the freshly-loaded graph.
+        with self._load_lock:
+            if self._loaded:
+                return
+            self._do_load()
+
+    def _do_load(self) -> None:
         try:
             import networkx as nx
         except ImportError as exc:
