@@ -316,15 +316,22 @@ class HippoRAGRetriever:
             return int(cur.fetchone()[0])
 
     def _try_load_pickle(self, expected_edges: int):
-        """Return the unpickled graph if cache is valid, else None."""
+        """Return the unpickled graph if cache is valid, else None.
+
+        Strict edge-count match. Drift is not expected because
+        `entity_graph` is only written by `scripts/build_entity_graph.py`,
+        which now saves the pickle itself as its final step. If the
+        counts differ here, something genuinely changed (re-ingest,
+        manual SQL, etc.) and we should rebuild.
+        """
         if not (self._PICKLE_PATH.exists() and self._META_PATH.exists()):
             return None
         try:
             meta = json.loads(self._META_PATH.read_text())
             if meta.get("edge_count") != expected_edges:
                 logger.info(
-                    "HippoRAG pickle stale (cached=%d, live=%d) — will rebuild",
-                    meta.get("edge_count", -1), expected_edges,
+                    "HippoRAG pickle stale (cached=%s, live=%d) — will rebuild",
+                    meta.get("edge_count"), expected_edges,
                 )
                 return None
             if meta.get("min_edge_weight") != self._min_edge_weight:
@@ -347,8 +354,28 @@ class HippoRAGRetriever:
         try:
             self._PICKLE_PATH.parent.mkdir(parents=True, exist_ok=True)
             t0 = time.monotonic()
-            with self._PICKLE_PATH.open("wb") as f:
-                pickle.dump(graph, f, protocol=pickle.HIGHEST_PROTOCOL)
+            # Wrap the file in a counter so we log progress every 200 MB —
+            # otherwise a multi-GB pickle.dump shows nothing for minutes.
+            class _ProgressFile:
+                def __init__(self, real_file, log_every_bytes=200_000_000):
+                    self._f = real_file
+                    self._written = 0
+                    self._next_mark = log_every_bytes
+                    self._step = log_every_bytes
+                def write(self, data):
+                    n = self._f.write(data)
+                    self._written += len(data)
+                    if self._written >= self._next_mark:
+                        logger.info("HippoRAG pickle: wrote %.0f MB so far…",
+                                    self._written / 1_000_000)
+                        self._next_mark += self._step
+                    return n
+                def close(self): return self._f.close()
+                def __getattr__(self, name): return getattr(self._f, name)
+
+            with self._PICKLE_PATH.open("wb") as raw:
+                pf = _ProgressFile(raw)
+                pickle.dump(graph, pf, protocol=pickle.HIGHEST_PROTOCOL)
             self._META_PATH.write_text(json.dumps({
                 "edge_count": graph.number_of_edges(),
                 "node_count": graph.number_of_nodes(),
@@ -382,17 +409,37 @@ class HippoRAGRetriever:
             return
 
         # 3. Cold path: build from Postgres, then write the pickle.
-        logger.info("Loading entity graph into memory from Postgres…")
+        # Stream the cursor (server-side, named cursor) instead of fetchall
+        # so we don't materialize 36M tuples in Python before we even start
+        # adding edges — saves ~3-4 GB of transient memory and lets us log
+        # progress as the loop runs.
+        logger.info("Loading %d edges from Postgres into memory…", live_edges)
         t0 = time.monotonic()
         self._graph = nx.Graph()
-        with psycopg.connect(self._db_dsn) as conn, conn.cursor() as cur:
-            cur.execute(
-                "SELECT entity_a, entity_b, co_occurrences FROM entity_graph "
-                "WHERE co_occurrences >= %s",
-                (self._min_edge_weight,),
-            )
-            for a, b, w in cur.fetchall():
-                self._graph.add_edge(a, b, weight=w)
+        log_every = max(1, live_edges // 20)   # 20 progress lines total
+        next_mark = log_every
+        i = 0
+        with psycopg.connect(self._db_dsn) as conn:
+            with conn.cursor(name="hipporag_load") as cur:
+                cur.execute(
+                    "SELECT entity_a, entity_b, co_occurrences FROM entity_graph "
+                    "WHERE co_occurrences >= %s",
+                    (self._min_edge_weight,),
+                )
+                for row in cur:
+                    a, b, w = row
+                    self._graph.add_edge(a, b, weight=w)
+                    i += 1
+                    if i >= next_mark:
+                        elapsed = time.monotonic() - t0
+                        rate = i / max(elapsed, 0.001)
+                        eta = (live_edges - i) / max(rate, 1)
+                        logger.info(
+                            "  %d / %d edges (%.1f%%, %.0fk/s, ~%.0fs left)",
+                            i, live_edges, 100 * i / live_edges,
+                            rate / 1000, eta,
+                        )
+                        next_mark += log_every
         logger.info(
             "Loaded entity graph: %d nodes, %d edges in %.1fs",
             self._graph.number_of_nodes(), self._graph.number_of_edges(),

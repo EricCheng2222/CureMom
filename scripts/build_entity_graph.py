@@ -45,9 +45,39 @@ DB_DSN = (
 )
 
 
+def _refresh_hipporag_pickle() -> None:
+    """Final step: rebuild the in-memory NetworkX graph from the freshly-
+    written entity_graph table and save it to disk as a pickle.
+
+    This must run AFTER all upserts in this process have committed,
+    inside the same script — that way the read sees only committed
+    rows and no other writer can race to add more during the read.
+    Eliminates the read-write drift we saw when running the rebuild as
+    a separate process.
+    """
+    from pathlib import Path
+    from src.search.hipporag import HippoRAGRetriever
+
+    log.info("Refreshing HippoRAG pickle from the freshly-built entity_graph…")
+    # Drop any stale cache so HippoRAGRetriever takes the cold path
+    # (rebuild from Postgres + write fresh pickle + matching meta).
+    for name in ("hipporag_graph.pkl", "hipporag_graph.meta.json"):
+        f = Path("data") / name
+        if f.exists():
+            f.unlink()
+    r = HippoRAGRetriever(DB_DSN)
+    r._ensure_loaded()
+    log.info(
+        "HippoRAG pickle ready: %d edges → data/hipporag_graph.pkl",
+        r._graph.number_of_edges() if r._graph is not None else 0,
+    )
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--source", choices=["mesh", "ner", "both"], default="mesh")
+    p.add_argument("--no-pickle", action="store_true",
+                   help="Skip the post-build HippoRAG pickle refresh (useful when chaining multiple builds).")
     args = p.parse_args()
 
     conn = psycopg.connect(DB_DSN)
@@ -65,6 +95,9 @@ def main() -> None:
             log.info("Merged %d NER entity-pair upserts on top.", n_ner)
     finally:
         conn.close()
+
+    if not args.no_pickle:
+        _refresh_hipporag_pickle()
 
 
 if __name__ == "__main__":
