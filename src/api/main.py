@@ -602,6 +602,18 @@ async def health() -> dict:
     return {"status": "ok"}
 
 
+@app.get("/api/v1/version")
+async def app_version() -> dict:
+    """Returns the mtime of the served app.js so already-open tabs can
+    detect a redeploy and prompt the user to refresh. The frontend polls
+    this every ~30s; if the value differs from the one captured on first
+    load, a "new version available" banner appears."""
+    try:
+        return {"app_js_mtime": int((_frontend_dir / "app.js").stat().st_mtime)}
+    except OSError:
+        return {"app_js_mtime": 0}
+
+
 @app.post("/api/v1/hipporag/reload", include_in_schema=True)
 async def reload_hipporag() -> dict:
     """Reload the HippoRAG entity graph from the DB.
@@ -671,9 +683,23 @@ _frontend_dir = _pathlib.Path(__file__).parent.parent.parent / "frontend"
 
 # Explicit routes for the three known frontend files — more reliable than
 # relying solely on a catch-all StaticFiles mount at "/".
+
+# index.html must never be cached: it points at versioned asset URLs
+# (app.js?v=N, style.css?v=N) and a stale copy locks the user into
+# whatever version those query strings referenced when it was cached.
+# Two tabs opened at different times would otherwise run different code.
+# The asset files themselves (.js / .css) keep aggressive caching because
+# their URL changes on every release — the cache-bust IS the versioning.
+_NO_CACHE_HEADERS = {
+    "Cache-Control": "no-cache, no-store, must-revalidate",
+    "Pragma": "no-cache",
+    "Expires": "0",
+}
+
+
 @app.get("/", include_in_schema=False)
 async def _serve_index():
-    return FileResponse(str(_frontend_dir / "index.html"))
+    return FileResponse(str(_frontend_dir / "index.html"), headers=_NO_CACHE_HEADERS)
 
 @app.get("/style.css", include_in_schema=False)
 async def _serve_css():

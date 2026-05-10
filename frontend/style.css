@@ -1211,6 +1211,45 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); }
   border-color: var(--red);
 }
 /* Type-specific quick actions: Cure for diseases, +/− for drugs/genes. */
+/* Stale-tab banner: shown when a redeploy is detected on a tab that
+   loaded an older app.js. Floats at the top, dismissable. */
+.stale-banner {
+  position: fixed;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 9999;
+  background: linear-gradient(135deg, #FBBF24 0%, #F59E0B 100%);
+  color: #1F2937;
+  padding: 10px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  box-shadow: 0 6px 24px rgba(0,0,0,0.35);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.stale-banner button {
+  background: rgba(31,41,55,.15);
+  color: inherit;
+  border: 1px solid rgba(31,41,55,.25);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.stale-banner button:hover {
+  background: rgba(31,41,55,.25);
+}
+.stale-banner button[aria-label="Dismiss"] {
+  padding: 2px 8px;
+  font-size: 16px;
+  line-height: 1;
+}
+
 /* Sharing section in the consumer sidebar */
 .share-btn {
   width: 100%;

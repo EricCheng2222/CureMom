@@ -226,6 +226,44 @@ populateProviderDropdowns().catch(err => {
 // Validate any stored key + reveal the Share section if so.
 _refreshAuthState();
 
+// ── Stale-tab detection ────────────────────────────────────────────────────
+// Multi-tab scenario: a redeploy bumps app.js's mtime on disk. Tabs opened
+// before the redeploy still run the old JS in memory. Poll /api/v1/version
+// every 30s; if the mtime differs from the one this tab saw on first load,
+// show a non-blocking banner asking the user to reload. Active tab fires
+// once on load to seed the baseline.
+let _versionBaseline = null;
+
+async function _checkAppVersion() {
+  try {
+    const r = await fetch(`${API}/api/v1/version`, { signal: AbortSignal.timeout(3000) });
+    if (!r.ok) return;
+    const { app_js_mtime } = await r.json();
+    if (!app_js_mtime) return;
+    if (_versionBaseline === null) {
+      _versionBaseline = app_js_mtime;
+      return;
+    }
+    if (app_js_mtime !== _versionBaseline) _showStaleVersionBanner();
+  } catch { /* network blip — ignore */ }
+}
+
+function _showStaleVersionBanner() {
+  if (document.getElementById('stale-banner')) return;   // already shown
+  const div = document.createElement('div');
+  div.id = 'stale-banner';
+  div.className = 'stale-banner';
+  div.innerHTML = `
+    <span>A newer version of the app is available.</span>
+    <button onclick="location.reload()">Reload</button>
+    <button onclick="this.parentElement.remove()" aria-label="Dismiss">×</button>
+  `;
+  document.body.appendChild(div);
+}
+
+_checkAppVersion();
+setInterval(_checkAppVersion, 30_000);
+
 // ── Knowledge graph panel ───────────────────────────────────────────────────
 // The graph is session-local and grows with each Q&A turn. After every
 // answer we POST to /api/v1/graph_extract with the question, the cleaned
