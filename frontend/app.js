@@ -695,92 +695,109 @@ async function sendConsumerMessage() {
   btn.disabled = true;
   const typing = appendTypingBubble();
 
+  const provider = document.getElementById('consumer-provider').value;
+  const simple   = document.getElementById('consumer-simple').checked;
+  const strategy = document.getElementById('consumer-strategy')?.value || 'full';
+  const reqBody = JSON.stringify({
+    query,
+    options: { top_k: 12, retrieval_strategy: strategy, llm_provider: provider, plain_language: simple },
+    history: chatHistory.slice(-MAX_HISTORY_TURNS * 2),  // last N user+assistant pairs
+  });
+
+  // Retry once on transport-level failure (Safari "Load failed" / connection
+  // dropped mid-stream). HTTP error responses and pipeline error events are
+  // terminal — we don't retry those.
+  const MAX_ATTEMPTS = 2;
+  let lastErr = null;
   try {
-    const provider = document.getElementById('consumer-provider').value;
-    const simple   = document.getElementById('consumer-simple').checked;
-    const strategy = document.getElementById('consumer-strategy')?.value || 'full';
-
-    const r = await apiFetch(`${API}/api/v1/query/stream`, {
-      method: 'POST',
-      headers: { 'Accept': 'text/event-stream' },
-      body: JSON.stringify({
-        query,
-        options: { top_k: 12, retrieval_strategy: strategy, llm_provider: provider, plain_language: simple },
-        history: chatHistory.slice(-MAX_HISTORY_TURNS * 2),  // last N user+assistant pairs
-      }),
-    });
-
-    if (!r.ok || !r.body) {
-      removeTypingBubble(typing);
-      const err = await r.json().catch(() => ({}));
-      appendAIBubble(`Sorry, I couldn't get a response. ${_formatErr(err, r)}`, []);
-      console.error('[query] HTTP', r.status, err);
-      return;
-    }
-
-    // Stream SSE events. Each event payload looks like:
-    //   data: {"stage": "<name>", ...}\n\n
-    // We update the typing-bubble label as stages arrive; the final
-    // 'complete' event carries the full result payload.
-    const reader = r.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    let data = null;
-    let errEvent = null;
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const events = buffer.split('\n\n');
-      buffer = events.pop() || '';
-      for (const raw of events) {
-        const line = raw.split('\n').find(l => l.startsWith('data: '));
-        if (!line) continue;
-        let obj;
-        try { obj = JSON.parse(line.slice(6)); } catch { continue; }
-        if (obj.stage === 'complete') {
-          data = obj.result;
-        } else if (obj.stage === 'error') {
-          errEvent = obj;
-        } else {
-          _setTypingStage(typing, obj);
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      try {
+        await _runQueryStream(typing, reqBody, query);
+        return;  // success or terminal-but-not-thrown (HTTP error, error event)
+      } catch (err) {
+        lastErr = err;
+        if (attempt < MAX_ATTEMPTS) {
+          console.warn(`[query/stream] attempt ${attempt} failed (${err?.message}); retrying…`);
+          await new Promise(res => setTimeout(res, 600));
         }
       }
     }
-
+    // Exhausted retries.
     removeTypingBubble(typing);
-
-    if (errEvent) {
-      appendAIBubble(`Sorry, I couldn't get a response. ${errEvent.detail || 'unknown error'}`, []);
-      console.error('[query/stream] error event:', errEvent);
-      return;
-    }
-    if (!data) {
-      appendAIBubble('No response returned (stream ended without a complete event).', []);
-      return;
-    }
-    const response = data.response ?? 'No response returned.';
-    appendAIBubble(response, data.citations ?? []);
-    // Successful authed call — first-time visitors should now see the Share section.
-    _refreshAuthState();
-    // Push BOTH turns to history. The user message was already pushed in
-    // appendUserBubble; here we add the assistant response as clean prose
-    // (strip [N] markers + disclaimer + follow-up section).
-    pushAssistantToHistory(response);
-    // Fire-and-forget: extract knowledge-graph nodes/edges in the background
-    // and merge into the side panel. Won't block the UI.
-    _extractGraph(query, response, data.citations ?? []);
-  } catch (err) {
-    removeTypingBubble(typing);
-    const detail = err?.message || String(err);
-    console.error('[query/stream] fetch threw:', err);
-    appendSystemErrorBubble(
-      'Could not reach the API. ' + detail
-    );
+    const detail = lastErr?.message || String(lastErr);
+    console.error('[query/stream] fetch threw after retries:', lastErr);
+    appendSystemErrorBubble('Could not reach the API. ' + detail);
   } finally {
     btn.disabled = false;
   }
+}
+
+// One attempt at running the stream. Returns normally on success OR on a
+// terminal non-retryable outcome (HTTP error / error stage event). Throws
+// on transport-level failures so the caller can retry.
+async function _runQueryStream(typing, reqBody, query) {
+  const r = await apiFetch(`${API}/api/v1/query/stream`, {
+    method: 'POST',
+    headers: { 'Accept': 'text/event-stream' },
+    body: reqBody,
+  });
+
+  if (!r.ok || !r.body) {
+    removeTypingBubble(typing);
+    const err = await r.json().catch(() => ({}));
+    appendAIBubble(`Sorry, I couldn't get a response. ${_formatErr(err, r)}`, []);
+    console.error('[query] HTTP', r.status, err);
+    return;  // terminal — caller should not retry
+  }
+
+  // Stream SSE events. Each event payload looks like:
+  //   data: {"stage": "<name>", ...}\n\n
+  // We update the typing-bubble label as stages arrive; the final
+  // 'complete' event carries the full result payload.
+  const reader = r.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let data = null;
+  let errEvent = null;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const events = buffer.split('\n\n');
+    buffer = events.pop() || '';
+    for (const raw of events) {
+      const line = raw.split('\n').find(l => l.startsWith('data: '));
+      if (!line) continue;
+      let obj;
+      try { obj = JSON.parse(line.slice(6)); } catch { continue; }
+      if (obj.stage === 'complete') {
+        data = obj.result;
+      } else if (obj.stage === 'error') {
+        errEvent = obj;
+      } else {
+        _setTypingStage(typing, obj);
+      }
+    }
+  }
+
+  removeTypingBubble(typing);
+
+  if (errEvent) {
+    appendAIBubble(`Sorry, I couldn't get a response. ${errEvent.detail || 'unknown error'}`, []);
+    console.error('[query/stream] error event:', errEvent);
+    return;
+  }
+  if (!data) {
+    // Stream ended cleanly but no complete event — ambiguous, treat as terminal
+    appendAIBubble('No response returned (stream ended without a complete event).', []);
+    return;
+  }
+  const response = data.response ?? 'No response returned.';
+  appendAIBubble(response, data.citations ?? []);
+  _refreshAuthState();
+  pushAssistantToHistory(response);
+  _extractGraph(query, response, data.citations ?? []);
 }
 
 function appendUserBubble(text) {
@@ -1157,4 +1174,14 @@ function escapeHtml(str) {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
+}
+
+// Drain any onclick="switchMode(...)" calls that fired against the inline
+// stub before app.js parsed. The real switchMode (function declaration above)
+// is hoisted to window at script start, so by the time we reach this line
+// it has already replaced the stub.
+if (window.__pendingMode) {
+  const mode = window.__pendingMode;
+  delete window.__pendingMode;
+  switchMode(mode);
 }

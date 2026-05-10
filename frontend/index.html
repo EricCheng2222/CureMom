@@ -10,12 +10,19 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="style.css?v=13" />
+  <script>
+    // Buffer onclick="switchMode(...)" calls that fire before the deferred
+    // app.js finishes parsing — otherwise an early landing-card click throws
+    // ReferenceError. The real switchMode in app.js replaces this stub via
+    // function-declaration hoisting, then drains __pendingMode at end-of-file.
+    window.switchMode = function(mode){ window.__pendingMode = mode; };
+  </script>
   <script src="https://unpkg.com/cytoscape@3.30.4/dist/cytoscape.min.js" defer></script>
   <script src="https://unpkg.com/layout-base@2.0.1/layout-base.js" defer></script>
   <script src="https://unpkg.com/cose-base@2.2.0/cose-base.js" defer></script>
   <script src="https://unpkg.com/cytoscape-fcose@2.2.0/cytoscape-fcose.js" defer></script>
   <script src="graph.js?v=10" defer></script>
-  <script src="app.js?v=24" defer></script>
+  <script src="app.js?v=25" defer></script>
 </head>
 <body>
 
