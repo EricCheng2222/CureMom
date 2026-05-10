@@ -465,6 +465,19 @@ function _onGraphNodeClick(nodePayload) {
       }).join('')}</div>`
     : `<div class="popover-empty-cites">No citations from the most recent answer mention this entity yet.</div>`;
 
+  // Type-specific quick actions. Disease → Cure; Drug/Gene → +/−
+  // (search for things that promote or inhibit the substance/protein).
+  // Other types just get Ask + Remove like before.
+  let typeActions = '';
+  if (nodePayload.type === 'DISEASE') {
+    typeActions = `<button class="popover-action-btn popover-cure-btn" title="Search for medicines that cure or treat this disease">Cure</button>`;
+  } else if (nodePayload.type === 'DRUG' || nodePayload.type === 'GENE') {
+    typeActions = `
+      <button class="popover-action-btn popover-promote-btn" title="Search for medicines that promote or increase this">+</button>
+      <button class="popover-action-btn popover-suppress-btn" title="Search for medicines that decrease or inhibit this">−</button>
+    `;
+  }
+
   pop.innerHTML = `
     <button class="popover-close-x" aria-label="Close">×</button>
     <div class="popover-header">
@@ -474,6 +487,7 @@ function _onGraphNodeClick(nodePayload) {
     ${citePills}
     <div class="popover-actions">
       <button class="popover-ask-btn">Ask about this</button>
+      ${typeActions}
       <button class="popover-remove-btn" title="Remove this node from the graph">Remove</button>
     </div>
   `;
@@ -487,12 +501,16 @@ function _onGraphNodeClick(nodePayload) {
 
   pop.querySelector('.popover-close-x')?.addEventListener('click', _hidePopover);
   pop.querySelector('.popover-ask-btn')?.addEventListener('click', () => {
-    const ta = document.getElementById('consumer-input');
-    if (!ta) return;
-    ta.value = `Tell me more about ${nodePayload.label} in this context.`;
-    autoResize(ta);
-    ta.focus();
-    _hidePopover();
+    _prefillChatFromGraph(`Tell me more about ${nodePayload.label} in this context.`);
+  });
+  pop.querySelector('.popover-cure-btn')?.addEventListener('click', () => {
+    _prefillChatFromGraph(`What medicines or treatments are known to cure or treat ${nodePayload.label}? Include both first-line therapies and emerging interventions.`);
+  });
+  pop.querySelector('.popover-promote-btn')?.addEventListener('click', () => {
+    _prefillChatFromGraph(`What medicines, supplements, or interventions are known to promote, increase, or upregulate ${nodePayload.label}?`);
+  });
+  pop.querySelector('.popover-suppress-btn')?.addEventListener('click', () => {
+    _prefillChatFromGraph(`What medicines, drugs, or interventions are known to inhibit, decrease, or suppress ${nodePayload.label}?`);
   });
   pop.querySelector('.popover-remove-btn')?.addEventListener('click', () => {
     if (!_graphInitialized) return;
@@ -500,6 +518,15 @@ function _onGraphNodeClick(nodePayload) {
     _refreshGraphChrome();
     _hidePopover();
   });
+}
+
+function _prefillChatFromGraph(text) {
+  const ta = document.getElementById('consumer-input');
+  if (!ta) return;
+  ta.value = text;
+  autoResize(ta);
+  ta.focus();
+  _hidePopover();
 }
 
 function _hidePopover() {

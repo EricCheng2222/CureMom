@@ -1210,6 +1210,45 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); }
   background: rgba(248,113,113,.12);
   border-color: var(--red);
 }
+/* Type-specific quick actions: Cure for diseases, +/− for drugs/genes. */
+.popover-action-btn {
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  font-weight: 700;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+  min-width: 32px;
+}
+.popover-cure-btn {
+  color: var(--node-disease, #F87171);
+  border: 1px solid rgba(248,113,113,.4);
+}
+.popover-cure-btn:hover {
+  background: rgba(248,113,113,.12);
+  border-color: var(--node-disease, #F87171);
+}
+.popover-promote-btn {
+  color: var(--node-chemical, #34D399);
+  border: 1px solid rgba(52,211,153,.4);
+  font-size: 14px;
+  line-height: 1;
+}
+.popover-promote-btn:hover {
+  background: rgba(52,211,153,.12);
+  border-color: var(--node-chemical, #34D399);
+}
+.popover-suppress-btn {
+  color: var(--node-symptom, #FB7185);
+  border: 1px solid rgba(251,113,133,.4);
+  font-size: 14px;
+  line-height: 1;
+}
+.popover-suppress-btn:hover {
+  background: rgba(251,113,133,.12);
+  border-color: var(--node-symptom, #FB7185);
+}
 .popover-close-x {
   position: absolute;
   top: 6px;
