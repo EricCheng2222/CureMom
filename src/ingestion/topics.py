@@ -295,6 +295,18 @@ TOPICS: list[IngestionTopic] = [
         priority=1,
     ),
 
+    # ── Missense mutations ──────────────────────────────────────────────────
+    # Broad coverage of missense-mutation literature: pathogenic variants,
+    # functional consequences, structure-function studies, VUS resolution.
+    # Cross-cuts every disease area we already index (autoimmune, ichthyosis,
+    # muscle / sarcopenia, complement deficiency, IFN signalling).
+    IngestionTopic(
+        name="missense_mutation",
+        mesh_query='"Mutation, Missense"[MeSH] OR "missense variant"[Title/Abstract]',
+        description="Missense mutations — pathogenic variants, structure-function, VUS resolution",
+        priority=1,
+    ),
+
     IngestionTopic(
         name="skin_barrier_function",
         mesh_query='("Filaggrin Proteins"[MeSH] OR "Loricrin"[Title/Abstract] OR "Transglutaminases"[MeSH] OR "Stratum Corneum"[Title/Abstract]) AND ("skin"[MeSH] OR "epidermis"[MeSH])',
