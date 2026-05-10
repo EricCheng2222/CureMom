@@ -100,7 +100,7 @@ def dedup_entities(
     if len(labels) < 2:
         return []
     if timeout_s is None:
-        timeout_s = float(os.environ.get("GRAPH_TIMEOUT_S", "600"))
+        timeout_s = float(os.environ.get("GRAPH_TIMEOUT_S", "120"))
 
     user_msg = f"Labels ({len(labels)}):\n" + "\n".join(f"- {lbl}" for lbl in labels)
     target = _resolve_provider(provider_spec)

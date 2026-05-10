@@ -262,10 +262,12 @@ class ClaudeProvider(LLMProvider):
         api_key: str | None = None,
         model: str = "claude-sonnet-4-6",
         max_tokens: int = 1024,
+        timeout_s: float = 120.0,
     ) -> None:
         self._api_key = api_key or os.environ["ANTHROPIC_API_KEY"]
         self._model = model
         self._max_tokens = max_tokens
+        self._timeout_s = timeout_s
 
     @property
     def name(self) -> str:
@@ -302,7 +304,7 @@ class ClaudeProvider(LLMProvider):
                 msgs.append({"role": role, "content": content})
         msgs.append({"role": "user", "content": user_message})
 
-        client = anthropic.Anthropic(api_key=self._api_key)
+        client = anthropic.Anthropic(api_key=self._api_key, timeout=self._timeout_s)
         message = client.messages.create(
             model=self._model,
             max_tokens=self._max_tokens,
@@ -331,10 +333,12 @@ class OpenAIProvider(LLMProvider):
         api_key: str | None = None,
         model: str = "gpt-4o",
         max_tokens: int = 1024,
+        timeout_s: float = 120.0,
     ) -> None:
         self._api_key = api_key or os.environ["OPENAI_API_KEY"]
         self._model = model
         self._max_tokens = max_tokens
+        self._timeout_s = timeout_s
 
     @property
     def name(self) -> str:
@@ -356,7 +360,7 @@ class OpenAIProvider(LLMProvider):
         context = _build_context_block(chunks, drug_cards=drug_cards)
         user_message = f"Context passages:\n\n{context}\n\nQuestion: {query}"
 
-        client = openai.OpenAI(api_key=self._api_key)
+        client = openai.OpenAI(api_key=self._api_key, timeout=self._timeout_s)
         response = client.chat.completions.create(
             model=self._model,
             max_tokens=self._max_tokens,
@@ -389,11 +393,13 @@ class NIMProvider(LLMProvider):
         model: str = "minimaxai/minimax-m2.7",
         max_tokens: int = 1024,
         base_url: str = "https://integrate.api.nvidia.com/v1",
+        timeout_s: float = 120.0,
     ) -> None:
         self._api_key = api_key or os.environ["NVIDIA_API_KEY"]
         self._model = model
         self._max_tokens = max_tokens
         self._base_url = base_url
+        self._timeout_s = timeout_s
 
     @property
     def name(self) -> str:
@@ -415,7 +421,7 @@ class NIMProvider(LLMProvider):
         context = _build_context_block(chunks, drug_cards=drug_cards)
         user_message = f"Context passages:\n\n{context}\n\nQuestion: {query}"
 
-        client = openai.OpenAI(api_key=self._api_key, base_url=self._base_url)
+        client = openai.OpenAI(api_key=self._api_key, base_url=self._base_url, timeout=self._timeout_s)
         response = client.chat.completions.create(
             model=self._model,
             max_tokens=self._max_tokens,

@@ -184,12 +184,18 @@ async def _startup_init_auth() -> None:
 
 
 @app.post("/api/v1/query")
-async def query(
+def query(
     req: QueryRequest,
     retriever: Annotated[HybridRetriever, Depends(get_retriever)],
     _key: Annotated[KeyRecord, Depends(require_api_key)] = None,
 ) -> dict[str, Any]:
-    """Main Q&A endpoint: retrieve relevant passages and return a cited response."""
+    """Main Q&A endpoint: retrieve relevant passages and return a cited response.
+
+    Plain `def` (not async) so FastAPI runs this in its threadpool. The
+    LLM provider clients (Anthropic SDK, OpenAI SDK, NIM) are synchronous
+    and would otherwise block the event loop for the entire LLM call,
+    freezing every other endpoint until it finishes.
+    """
     start = time.monotonic()
 
     filter_dict = req.filters.model_dump(exclude_none=False)
@@ -333,7 +339,7 @@ async def query(
 
 
 @app.post("/api/v1/graph_extract")
-async def graph_extract(
+def graph_extract(
     req: GraphExtractRequest,
     _key: Annotated[KeyRecord, Depends(require_api_key)] = None,
 ) -> dict[str, Any]:
@@ -364,7 +370,7 @@ async def graph_extract(
 
 
 @app.post("/api/v1/graph_dedup")
-async def graph_dedup(
+def graph_dedup(
     req: GraphDedupRequest,
     _key: Annotated[KeyRecord, Depends(require_api_key)] = None,
 ) -> dict[str, Any]:
