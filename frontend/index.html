@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="style.css?v=7" />
+  <link rel="stylesheet" href="style.css?v=8" />
   <script src="https://unpkg.com/cytoscape@3.30.4/dist/cytoscape.min.js"></script>
   <script src="https://unpkg.com/layout-base@2.0.1/layout-base.js"></script>
   <script src="https://unpkg.com/cose-base@2.2.0/cose-base.js"></script>
@@ -107,7 +107,11 @@
       </div>
 
       <div class="sidebar-section">
-        <button id="share-access-btn" class="example-btn" onclick="onShareAccessClick()" title="Mint a child API key to share with someone else">Share access</button>
+        <div class="section-label">Sharing</div>
+        <button id="share-access-btn" class="share-btn" onclick="onShareAccessClick()" title="Mint a child API key to share with someone else">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" style="vertical-align:-2px;margin-right:4px"><path d="M3 8h10M9 4l4 4-4 4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          Share access (mint key)
+        </button>
       </div>
 
       <div class="sidebar-footer">
