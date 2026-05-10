@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
 from ..search.hybrid_retriever import RetrievedChunk
+
+_CITE_MARKER_RE = re.compile(r"\[(\d+)\]")
 
 
 @dataclass
@@ -87,32 +90,66 @@ def build_response(
     Only chunks that were actually cited (by chunk_id) are included in citations.
     If cited_chunk_ids is empty (extractive mode with all chunks as sources),
     all chunks are included.
+
+    Because the citations array is renumbered sequentially from 1, the LLM's
+    original [N] markers in `response_text` no longer line up with the array.
+    We rewrite each marker to its new index so the frontend's
+    `citations[N-1]` lookup works. Markers that don't map (out-of-range or
+    pointing at an uncited chunk) are left untouched.
     """
     # Build index by chunk_id
     chunk_by_id = {c.chunk_id: c for c in chunks}
 
     citations: list[Citation] = []
+    chunk_id_to_new_idx: dict[int, int] = {}
     if cited_chunk_ids:
         seen: set[int] = set()
         idx = 1
         for chunk_id in cited_chunk_ids:
             if chunk_id in chunk_by_id and chunk_id not in seen:
                 citations.append(build_citation(idx, chunk_by_id[chunk_id]))
+                chunk_id_to_new_idx[chunk_id] = idx
                 seen.add(chunk_id)
                 idx += 1
     else:
-        # Extractive mode: include all retrieved chunks as citations
+        # Extractive mode: include all retrieved chunks as citations.
+        # Indices already match [N] in the prompt, so no rewrite needed.
         for idx, chunk in enumerate(chunks, start=1):
             citations.append(build_citation(idx, chunk))
+            chunk_id_to_new_idx[chunk.chunk_id] = idx
+
+    rewritten_text = _rewrite_citation_markers(
+        response_text, chunks, chunk_id_to_new_idx
+    )
 
     return QueryResponse(
         query=query,
-        response_text=response_text,
+        response_text=rewritten_text,
         citations=citations,
         retrieval_strategy=retrieval_strategy,
         model_used=model_used,
         total_chunks_retrieved=len(chunks),
     )
+
+
+def _rewrite_citation_markers(
+    text: str,
+    chunks: list[RetrievedChunk],
+    chunk_id_to_new_idx: dict[int, int],
+) -> str:
+    """Map each [N] in `text` (where N indexes into `chunks`, 1-based) to
+    the new sequential index assigned to that chunk_id in the citations
+    array. Markers we can't map are left as-is."""
+
+    def repl(m: re.Match) -> str:
+        old = int(m.group(1))
+        if 1 <= old <= len(chunks):
+            new = chunk_id_to_new_idx.get(chunks[old - 1].chunk_id)
+            if new is not None:
+                return f"[{new}]"
+        return m.group(0)
+
+    return _CITE_MARKER_RE.sub(repl, text)
 
 
 def response_to_dict(r: QueryResponse) -> dict[str, Any]:
