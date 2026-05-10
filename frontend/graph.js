@@ -24,29 +24,20 @@
       return fallback;
     }
   }
-  // Deterministic per-label palette. We dropped semantic types (everything
-  // is OTHER now) so we can't color by type — instead, hash the label to
-  // pick from a vibrant palette. Same concept across turns = same color.
-  const NODE_PALETTE = [
-    _readVar('--node-chemical',  '#34D399'),  // mint green
-    _readVar('--node-disease',   '#F87171'),  // coral red
-    _readVar('--node-gene',      '#818CF8'),  // periwinkle
-    _readVar('--node-anatomy',   '#FBBF24'),  // amber
-    _readVar('--node-symptom',   '#FB7185'),  // rose
-    _readVar('--node-procedure', '#A78BFA'),  // lavender
-    '#22D3EE',                                // cyan
-    '#F472B6',                                // pink
-    '#84CC16',                                // lime
-    '#FB923C',                                // orange
-  ];
-  function _colorFor(label) {
-    // Simple djb2-style hash → palette index. Stable across reloads.
-    const s = (label || '').toLowerCase();
-    let h = 5381;
-    for (let i = 0; i < s.length; i++) {
-      h = ((h << 5) + h + s.charCodeAt(i)) | 0;
-    }
-    return NODE_PALETTE[Math.abs(h) % NODE_PALETTE.length];
+  // Type-based palette. The LLM emits a `types` map alongside relations
+  // classifying each concept into one of six buckets (DRUG / DISEASE /
+  // GENE / ANATOMY / SYMPTOM / OTHER). Colors match the legend in the
+  // graph topbar.
+  const TYPE_COLORS = {
+    DRUG:    _readVar('--node-chemical', '#34D399'),  // mint green
+    DISEASE: _readVar('--node-disease',  '#F87171'),  // coral red
+    GENE:    _readVar('--node-gene',     '#818CF8'),  // periwinkle
+    ANATOMY: _readVar('--node-anatomy',  '#FBBF24'),  // amber
+    SYMPTOM: _readVar('--node-symptom',  '#FB7185'),  // rose
+    OTHER:   _readVar('--node-default',  '#94A3B8'),  // slate
+  };
+  function _colorFor(_label, type) {
+    return TYPE_COLORS[type] || TYPE_COLORS.OTHER;
   }
 
   const state = {
@@ -85,7 +76,7 @@
         {
           selector: 'node',
           style: {
-            'background-color': (ele) => _colorFor(ele.data('label')),
+            'background-color': (ele) => _colorFor(ele.data('label'), ele.data('type')),
             'label':            'data(label)',
             'color':            '#F1F5F9',
             'font-size':        '9px',

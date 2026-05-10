@@ -101,15 +101,27 @@ _GRAPH_PROMPT = """You extract a small biomedical knowledge graph from a questio
 
 The answer is a summary of research papers. Citation markers look like [1], [2], [3].
 
-Output ONLY directed relations between concepts mentioned in the answer. No prose, no markdown, no entity list — just relations. Each subject and object you write becomes a node automatically.
+Output directed relations between concepts mentioned in the answer, plus a `types` map that classifies each concept. No prose, no markdown — just the JSON object.
 
 OUTPUT SHAPE:
 
 {
   "relations": [
     {"subject":"<concept>", "predicate":"<verb phrase>", "object":"<concept>", "citations":[<ints>]}
-  ]
+  ],
+  "types": {
+    "<concept label>": "<one of: DRUG, DISEASE, GENE, ANATOMY, SYMPTOM, OTHER>"
+  }
 }
+
+The `types` map MUST contain an entry for every distinct subject/object label used in `relations`. Use ONE entry per label (case-insensitive). Pick exactly one of:
+
+  DRUG     — drugs, chemicals, supplements, biologics (hydroxychloroquine, creatine, IGF-1 if the entity is the molecule itself)
+  DISEASE  — diseases, syndromes, disorders (SLE, lupus nephritis, sarcopenia, ichthyosis)
+  GENE     — genes, gene products, proteins, pathways (myostatin, mTORC1, JAK-STAT pathway, TLR9, complement system)
+  ANATOMY  — tissues, organs, cell types (skeletal muscle, liver, B cell, satellite cells, dermis)
+  SYMPTOM  — phenotypes, clinical states, observed effects (muscle hypertrophy, autoimmunity, fatigue, hyperkeratosis)
+  OTHER    — anything that doesn't fit the five categories above (procedures, biomarkers, abstract processes like "protein synthesis" if you can't pick another)
 
 CONCEPTS (subjects/objects) — pick SPECIFIC, NAMED things mentioned in the answer:
   ✓ Named genes/proteins:        myostatin, IGF-1, METTL3, mTORC1, klotho, TGF-beta
@@ -155,13 +167,24 @@ WORKED EXAMPLE (learn the shape, don't copy values):
 Answer: "Growth hormone stimulates the liver to produce IGF-1 [1], which activates the PI3K/AKT/mTOR pathway in skeletal muscle to promote hypertrophy [1,2]. Myostatin opposes this by inhibiting protein synthesis [3]."
 
 Output:
-{"relations":[
-  {"subject":"growth hormone","predicate":"stimulates","object":"liver","citations":[1]},
-  {"subject":"liver","predicate":"produces","object":"IGF-1","citations":[1]},
-  {"subject":"IGF-1","predicate":"activates","object":"PI3K/AKT/mTOR pathway","citations":[1,2]},
-  {"subject":"PI3K/AKT/mTOR pathway","predicate":"promotes","object":"muscle hypertrophy","citations":[2]},
-  {"subject":"myostatin","predicate":"inhibits","object":"protein synthesis","citations":[3]}
-]}"""
+{
+  "relations":[
+    {"subject":"growth hormone","predicate":"stimulates","object":"liver","citations":[1]},
+    {"subject":"liver","predicate":"produces","object":"IGF-1","citations":[1]},
+    {"subject":"IGF-1","predicate":"activates","object":"PI3K/AKT/mTOR pathway","citations":[1,2]},
+    {"subject":"PI3K/AKT/mTOR pathway","predicate":"promotes","object":"muscle hypertrophy","citations":[2]},
+    {"subject":"myostatin","predicate":"inhibits","object":"protein synthesis","citations":[3]}
+  ],
+  "types":{
+    "growth hormone":"DRUG",
+    "liver":"ANATOMY",
+    "IGF-1":"GENE",
+    "PI3K/AKT/mTOR pathway":"GENE",
+    "muscle hypertrophy":"SYMPTOM",
+    "myostatin":"GENE",
+    "protein synthesis":"OTHER"
+  }
+}"""
 
 
 def _build_user_message(query: str, answer: str) -> str:
@@ -298,17 +321,28 @@ def _nim_graph(user_msg: str, provider_spec: str | None, timeout_s: float) -> di
 _JSON_RE = re.compile(r"\{[\s\S]*\}")
 
 
+_VALID_TYPES = {"DRUG", "DISEASE", "GENE", "ANATOMY", "SYMPTOM", "OTHER"}
+
+
 def _parse_graph(raw: str) -> dict[str, Any]:
     m = _JSON_RE.search(raw)
+    empty = {"relations": [], "types": {}, "_raw": raw}
     if not m:
-        return {"entities": [], "relations": [], "_raw": raw}
+        return empty
     try:
         obj = json.loads(m.group(0))
     except json.JSONDecodeError:
-        return {"entities": [], "relations": [], "_raw": raw}
-    ents = obj.get("entities") if isinstance(obj.get("entities"), list) else []
+        return empty
     rels = obj.get("relations") if isinstance(obj.get("relations"), list) else []
-    return {"entities": ents, "relations": rels, "_raw": raw}
+    raw_types = obj.get("types") if isinstance(obj.get("types"), dict) else {}
+    # Lowercase keys + clamp values to the allowed set.
+    types: dict[str, str] = {}
+    for label, t in raw_types.items():
+        if not isinstance(label, str) or not isinstance(t, str):
+            continue
+        t_up = t.strip().upper()
+        types[label.strip().lower()] = t_up if t_up in _VALID_TYPES else "OTHER"
+    return {"relations": rels, "types": types, "_raw": raw}
 
 
 # ─── Filter & assemble ───────────────────────────────────────────────────────
@@ -316,6 +350,7 @@ def _parse_graph(raw: str) -> dict[str, Any]:
 def _build_nodes_from_relations(
     raw_relations: list[dict[str, Any]],
     answer_text: str = "",
+    types_map: dict[str, str] | None = None,
 ) -> tuple[list[GraphNode], dict[str, str]]:
     """Each unique subject/object string in `raw_relations` becomes a node.
 
@@ -352,6 +387,7 @@ def _build_nodes_from_relations(
     canonical: dict[str, GraphNode] = {}     # id -> GraphNode
     label_to_id: dict[str, str] = {}         # lowercase label -> canonical id
 
+    types_lookup = types_map or {}
     for label_lc, label in seen_labels.items():
         if label_lc in _VAGUE_LABELS:
             continue
@@ -361,8 +397,9 @@ def _build_nodes_from_relations(
         if nid in canonical:
             label_to_id[label_lc] = nid
             continue
+        ntype = types_lookup.get(label_lc, "OTHER")
         canonical[nid] = GraphNode(
-            id=nid, label=label, type="OTHER",
+            id=nid, label=label, type=ntype,
             citations=[], kb_id=None,
         )
         label_to_id[label_lc] = nid
@@ -514,14 +551,16 @@ def extract_graph(
         return GraphPayload(nodes=[], edges=[], error=msg)
 
     raw_relations = graph_obj.get("relations", [])
+    raw_types = graph_obj.get("types", {}) or {}
     raw_dump = graph_obj.get("_raw", "") or ""
 
     # Each unique subject/object string in the relations becomes a node.
     # Grounding: the label must appear (case-insensitively) as a substring
-    # of the answer text. The answer is the authoritative source — NER
-    # was an incomplete proxy for "is this concept actually mentioned".
+    # of the answer text. Type comes from the LLM's `types` map (one of
+    # DRUG/DISEASE/GENE/ANATOMY/SYMPTOM/OTHER); defaults to OTHER if the
+    # LLM forgot to classify it.
     canonical_nodes, label_to_id = _build_nodes_from_relations(
-        raw_relations, answer_text=answer,
+        raw_relations, answer_text=answer, types_map=raw_types,
     )
 
     edges = _build_edges(raw_relations, label_to_id, citation_index_to_chunk_id)
