@@ -739,6 +739,18 @@ function appendUserBubble(text) {
   scrollChat();
 }
 
+// Stage labels cycle as the user waits, so they get a subtle hint about
+// which step is taking time instead of staring at three dots forever.
+// Timings are approximate — tuned to typical NIM/Claude /full pipeline
+// (analyze → drug lookup → retrieve → rerank → LLM synthesis).
+const _TYPING_STAGES = [
+  { atMs:     0, label: 'Analyzing your question…' },
+  { atMs:  2500, label: 'Searching the literature…' },
+  { atMs:  6000, label: 'Reading and ranking sources…' },
+  { atMs: 12000, label: 'Composing the answer…' },
+  { atMs: 60000, label: 'Long answers can take a minute or two — still working…' },
+];
+
 function appendTypingBubble() {
   const msgs = document.getElementById('chat-messages');
   const d = document.createElement('div');
@@ -749,13 +761,28 @@ function appendTypingBubble() {
     </div>
     <div class="msg-content typing-bubble">
       <div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div>
+      <div class="typing-stage" data-typing-stage>${_TYPING_STAGES[0].label}</div>
     </div>`;
   msgs.appendChild(d);
+
+  // Drive the stage label off the wall clock; stop on remove.
+  const start = Date.now();
+  const stageEl = d.querySelector('[data-typing-stage]');
+  d._stageTimer = setInterval(() => {
+    const elapsed = Date.now() - start;
+    let pick = _TYPING_STAGES[0];
+    for (const s of _TYPING_STAGES) if (elapsed >= s.atMs) pick = s;
+    if (stageEl && stageEl.textContent !== pick.label) stageEl.textContent = pick.label;
+  }, 500);
+
   scrollChat();
   return d;
 }
 
-function removeTypingBubble(el) { el?.remove(); }
+function removeTypingBubble(el) {
+  if (el && el._stageTimer) clearInterval(el._stageTimer);
+  el?.remove();
+}
 
 function appendAIBubble(text, citations) {
   const msgs = document.getElementById('chat-messages');
