@@ -268,6 +268,18 @@ TOPICS: list[IngestionTopic] = [
         priority=1,
     ),
 
+    # ── C1q (complement initiator) ──────────────────────────────────────────
+    # Spans multiple disease areas the corpus already touches: SLE / lupus
+    # nephritis (immune complex deposition), neurodegeneration (synaptic
+    # pruning), cancer, fertility / pre-eclampsia. MeSH covers indexed
+    # papers; the Title/Abstract OR catches recent unindexed ones.
+    IngestionTopic(
+        name="c1q_biology",
+        mesh_query='"Complement C1q"[MeSH] OR "C1q"[Title/Abstract]',
+        description="C1q biology — classical complement initiator, apoptotic clearance, synaptic pruning, autoimmunity",
+        priority=1,
+    ),
+
     IngestionTopic(
         name="skin_barrier_function",
         mesh_query='("Filaggrin Proteins"[MeSH] OR "Loricrin"[Title/Abstract] OR "Transglutaminases"[MeSH] OR "Stratum Corneum"[Title/Abstract]) AND ("skin"[MeSH] OR "epidermis"[MeSH])',
