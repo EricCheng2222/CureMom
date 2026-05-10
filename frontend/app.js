@@ -770,9 +770,13 @@ async function sendConsumerMessage() {
     // Fire-and-forget: extract knowledge-graph nodes/edges in the background
     // and merge into the side panel. Won't block the UI.
     _extractGraph(query, response, data.citations ?? []);
-  } catch {
+  } catch (err) {
     removeTypingBubble(typing);
-    appendAIBubble('Could not reach the API. Make sure the server is running.', []);
+    const detail = err?.message || String(err);
+    console.error('[query/stream] fetch threw:', err);
+    appendSystemErrorBubble(
+      'Could not reach the API. ' + detail
+    );
   } finally {
     btn.disabled = false;
   }
@@ -830,6 +834,24 @@ function _setTypingStage(bubbleEl, evt) {
 }
 
 function removeTypingBubble(el) { el?.remove(); }
+
+function appendSystemErrorBubble(text) {
+  // Distinct styling from appendAIBubble — no AI avatar, amber color, an
+  // explicit "System error" label. Important: users were mistaking the
+  // generic "Could not reach the API" fallback for the LLM speaking.
+  const msgs = document.getElementById('chat-messages');
+  const d = document.createElement('div');
+  d.className = 'msg msg-system';
+  d.innerHTML = `
+    <div class="msg-content system-error">
+      <div class="system-error-label">⚠ System error</div>
+      <div class="system-error-text"></div>
+      <div class="system-error-hint">Not from the AI — the browser couldn't talk to the server. Check your network, the API key, or whether the URL has rotated.</div>
+    </div>`;
+  d.querySelector('.system-error-text').textContent = text;
+  msgs.appendChild(d);
+  scrollChat();
+}
 
 function appendAIBubble(text, citations) {
   const msgs = document.getElementById('chat-messages');
