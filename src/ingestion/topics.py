@@ -280,6 +280,21 @@ TOPICS: list[IngestionTopic] = [
         priority=1,
     ),
 
+    # ── IFNAR1 (type-I interferon receptor) ─────────────────────────────────
+    # IFNAR1 is the alpha-subunit of the type-I IFN receptor. Central to:
+    #   - SLE / lupus (the type-I IFN signature drives much of the pathology)
+    #   - Antiviral immunity
+    #   - Cancer immunotherapy (anti-PD-1 cross-talk)
+    #   - Anifrolumab (anti-IFNAR1) mechanism of action
+    # MeSH has one heading for the heterodimeric receptor; we OR Title/Abstract
+    # for "IFNAR1" specifically so we don't miss subunit-level work.
+    IngestionTopic(
+        name="ifnar1_biology",
+        mesh_query='"Receptor, Interferon alpha-beta"[MeSH] OR "IFNAR1"[Title/Abstract] OR "IFN-alpha receptor 1"[Title/Abstract]',
+        description="IFNAR1 / type-I interferon receptor — IFN signature in SLE, antiviral immunity, anifrolumab",
+        priority=1,
+    ),
+
     IngestionTopic(
         name="skin_barrier_function",
         mesh_query='("Filaggrin Proteins"[MeSH] OR "Loricrin"[Title/Abstract] OR "Transglutaminases"[MeSH] OR "Stratum Corneum"[Title/Abstract]) AND ("skin"[MeSH] OR "epidermis"[MeSH])',

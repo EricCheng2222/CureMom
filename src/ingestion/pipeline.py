@@ -109,11 +109,34 @@ def esearch_pmids(
     if date_to:
         params["maxdate"] = date_to
 
-    config.throttle()
-    xml = _ncbi_get(client, ESEARCH_URL, params)
-
     from lxml import etree
-    root = etree.fromstring(xml)
+
+    # PubMed eutils flaps occasionally — backend returns
+    # `<ERROR>Search Backend failed: …</ERROR>` and no <Count>. Without
+    # retry we'd silently treat that as 0 hits and skip the topic. Three
+    # attempts with growing backoff covers ~95% of flap windows.
+    last_err: str | None = None
+    for attempt in range(1, 4):
+        config.throttle()
+        xml = _ncbi_get(client, ESEARCH_URL, params)
+        root = etree.fromstring(xml)
+        err = root.findtext("ERROR")
+        if err:
+            last_err = err
+            wait = 5 * attempt
+            logger.warning(
+                "ESearch backend error (attempt %d/3): %s — retrying in %ds",
+                attempt, err, wait,
+            )
+            import time
+            time.sleep(wait)
+            continue
+        break
+    else:
+        raise RuntimeError(
+            f"NCBI esearch kept returning <ERROR> after 3 attempts: {last_err}"
+        )
+
     count = int((root.findtext("Count") or "0"))
     web_env = root.findtext("WebEnv") or ""
     query_key = root.findtext("QueryKey") or ""
