@@ -706,30 +706,67 @@ async function sendConsumerMessage() {
 
   // Retry once on transport-level failure (Safari "Load failed" / connection
   // dropped mid-stream). HTTP error responses and pipeline error events are
-  // terminal — we don't retry those.
-  const MAX_ATTEMPTS = 2;
+  // terminal — we don't retry those. If both stream attempts fail, fall back
+  // to the non-streaming /query endpoint (single POST → single JSON response,
+  // which survives the same network paths that kill long-lived HTTP/2 streams
+  // on some iOS-Safari + middlebox combos).
+  const MAX_STREAM_ATTEMPTS = 2;
   let lastErr = null;
   try {
-    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    for (let attempt = 1; attempt <= MAX_STREAM_ATTEMPTS; attempt++) {
       try {
         await _runQueryStream(typing, reqBody, query);
         return;  // success or terminal-but-not-thrown (HTTP error, error event)
       } catch (err) {
         lastErr = err;
-        if (attempt < MAX_ATTEMPTS) {
+        if (attempt < MAX_STREAM_ATTEMPTS) {
           console.warn(`[query/stream] attempt ${attempt} failed (${err?.message}); retrying…`);
           await new Promise(res => setTimeout(res, 600));
         }
       }
     }
-    // Exhausted retries.
+    // Both stream attempts failed. Fall back to the non-streaming endpoint.
+    console.warn('[query] stream failed twice, falling back to /api/v1/query');
+    _setTypingStage(typing, { stage: 'fallback' });
+    try {
+      await _runQueryNonStreaming(typing, reqBody, query);
+      return;
+    } catch (err) {
+      lastErr = err;
+      console.error('[query] non-streaming fallback also failed:', err);
+    }
+    // Both paths exhausted.
     removeTypingBubble(typing);
     const detail = lastErr?.message || String(lastErr);
-    console.error('[query/stream] fetch threw after retries:', lastErr);
     appendSystemErrorBubble('Could not reach the API. ' + detail);
   } finally {
     btn.disabled = false;
   }
+}
+
+// Non-streaming fallback for /query. Used when /query/stream fails twice in
+// a row — typically because iOS Safari + the user's middlebox can't keep a
+// long HTTP/2 stream open. The response shape is identical to the SSE
+// "complete" event's `result` field, so downstream handling stays the same.
+async function _runQueryNonStreaming(typing, reqBody, query) {
+  const r = await apiFetch(`${API}/api/v1/query`, {
+    method: 'POST',
+    body: reqBody,
+  });
+  if (!r.ok) {
+    removeTypingBubble(typing);
+    const err = await r.json().catch(() => ({}));
+    appendAIBubble(`Sorry, I couldn't get a response. ${_formatErr(err, r)}`, []);
+    console.error('[query] HTTP', r.status, err);
+    return;
+  }
+  const data = await r.json();
+  removeTypingBubble(typing);
+  const response = data.response ?? 'No response returned.';
+  appendAIBubble(response, data.citations ?? []);
+  _refreshAuthState();
+  pushAssistantToHistory(response);
+  _extractGraph(query, response, data.citations ?? []);
 }
 
 // One attempt at running the stream. Returns normally on success OR on a
@@ -821,6 +858,7 @@ const _STAGE_LABELS = {
   drug_lookup:   'Looking up drug references…',
   synthesizing:  'Composing the answer…',
   verifying:     'Verifying citations…',
+  fallback:      'Connection unstable — retrying without streaming…',
 };
 
 function appendTypingBubble() {
