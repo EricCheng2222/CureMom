@@ -79,50 +79,43 @@ _JSON_RE = re.compile(r"\{[\s\S]*\}")
 def analyze_query(query: str, provider_spec: str | None = None) -> QueryAnalysis:
     """Run a one-shot LLM call to extract structured intent + terms.
 
-    Falls back to a simple QueryAnalysis(intent='general') if the LLM is
-    unreachable or produces unparseable output. (This is the one place we
-    *do* fall back gracefully — the user's query still gets answered, it
-    just won't benefit from drug-aware expansion.)
+    Always uses Claude Haiku (fast + cheap + reliable JSON). Independent
+    of whichever provider the user picked for QA — query analysis is a
+    meta-task and we want consistency.
+
+    Falls back to QueryAnalysis(intent='general') if the LLM is
+    unreachable or produces unparseable output, so the user's query
+    still gets answered without drug-aware expansion.
     """
     try:
-        provider = get_provider(provider_spec)
-        # Build a tiny synthetic chunk list — providers expect chunks, but
-        # this is a meta-task and we only want the model's text out.
-        # We bypass synthesize() and call the LLM directly via the provider's
-        # internals where possible. Simpler: use httpx directly to ollama
-        # for medgemma, since that's the most common case.
-        return _analyze_via_ollama(query, provider_spec)
+        return _analyze_via_claude(query)
     except Exception as exc:
         logger.warning("LLM query analysis failed (%s); using passthrough.", exc)
         return QueryAnalysis(intent="general", raw=str(exc))
 
 
-def _analyze_via_ollama(query: str, provider_spec: str | None) -> QueryAnalysis:
-    """Call Ollama directly for a structured analysis. Ignores non-Ollama provider
-    specs and uses the configured default Ollama model — query analysis is
-    cheap and we want consistency, not the user's choice of OpenAI/Claude
-    just for this step."""
-    import os, httpx
-    base = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-    model = os.environ.get("OLLAMA_MODEL", "medgemma:4b")
-    if provider_spec and provider_spec.startswith("ollama/"):
-        model = provider_spec.split("/", 1)[1]
+def _analyze_via_claude(query: str) -> QueryAnalysis:
+    """Call Anthropic Messages API directly for structured analysis.
 
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": _ANALYZER_PROMPT},
-            {"role": "user", "content": query},
-        ],
-        "stream": False,
-        "format": "json",                   # Ollama: enforce JSON output
-        "options": {"num_ctx": 4096, "temperature": 0.0},
-    }
-    with httpx.Client(timeout=30) as client:
-        r = client.post(f"{base}/api/chat", json=payload)
-        r.raise_for_status()
-        raw = r.json()["message"]["content"]
+    Cheap with Haiku (~$0.0001/call) and fast (1-2s). The system prompt
+    instructs JSON output; _parse extracts it via regex.
+    """
+    import os
+    import anthropic
 
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if not api_key or api_key == "your_anthropic_api_key_here":
+        raise RuntimeError("ANTHROPIC_API_KEY not set")
+    model = os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
+
+    client = anthropic.Anthropic(api_key=api_key, timeout=30.0)
+    msg = client.messages.create(
+        model=model,
+        max_tokens=512,
+        system=_ANALYZER_PROMPT,
+        messages=[{"role": "user", "content": query}],
+    )
+    raw = msg.content[0].text if msg.content else ""
     return _parse(raw)
 
 

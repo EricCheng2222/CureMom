@@ -2,6 +2,73 @@
 
 const API = '';
 
+// ── API key (X-API-Key header on every request) ─────────────────────────────
+// Admin generates the bootstrap key once (logged to uvicorn stdout on first
+// run). Each non-admin key can mint exactly one child key via /keys/generate.
+const KEY_STORAGE = 'curemom_api_key';
+
+function getApiKey() {
+  return localStorage.getItem(KEY_STORAGE) || '';
+}
+
+function setApiKey(k) {
+  if (k) localStorage.setItem(KEY_STORAGE, k.trim());
+  else localStorage.removeItem(KEY_STORAGE);
+}
+
+function ensureApiKey() {
+  let k = getApiKey();
+  if (!k) {
+    k = (prompt('Enter your CureMom API key:\n\n(Ask the admin if you don\'t have one. The key is stored locally in your browser.)') || '').trim();
+    if (k) setApiKey(k);
+  }
+  return k;
+}
+
+async function onShareAccessClick() {
+  // Mint a child key. Admin can mint unlimited; non-admin gets exactly one.
+  // Backend enforces; we surface the result either way.
+  const note = (prompt('Optional label for the new key (e.g. "Alice"):') || '').trim();
+  try {
+    const r = await apiFetch(`${API}/api/v1/keys/generate`, {
+      method: 'POST',
+      body: JSON.stringify({ note: note || null }),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      alert('Could not mint key: ' + _formatErr(err, r));
+      return;
+    }
+    const data = await r.json();
+    // Show the new key with copy-to-clipboard. The browser prompt is the
+    // simplest cross-browser way to display + let the user copy.
+    prompt(
+      'Share this key (you will not see it again):\n' +
+      (note ? `Label: ${note}\n\n` : '\n'),
+      data.key,
+    );
+  } catch (err) {
+    alert('Could not mint key: ' + (err.message || err));
+  }
+}
+
+// Wrap fetch so every call carries X-API-Key. Same signature as fetch().
+async function apiFetch(url, opts = {}) {
+  const key = ensureApiKey();
+  const headers = new Headers(opts.headers || {});
+  headers.set('X-API-Key', key);
+  if (opts.body && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json');
+  }
+  const r = await fetch(url, { ...opts, headers });
+  if (r.status === 401) {
+    // Bad key — clear it so the next request prompts again.
+    setApiKey('');
+    alert('API key rejected. Reload to enter a new one.');
+  }
+  return r;
+}
+
 // FastAPI returns errors in three shapes:
 //   { detail: "string message" }                — explicit HTTPException
 //   { detail: [{type, loc, msg, ...}, ...] }   — Pydantic 422 validation
@@ -71,9 +138,6 @@ async function populateProviderDropdowns() {
   const status = await r.json();
   console.log('[providers] status:', status);
 
-  const ollama = status.providers?.ollama || {};
-  const installed = ollama.installed_models || [];
-  const defaultOllama = ollama.model;
   const claude = status.providers?.claude || {};
   const openai = status.providers?.openai || {};
   const nim = status.providers?.nim || {};
@@ -83,27 +147,6 @@ async function populateProviderDropdowns() {
     if (!sel) continue;
     // Strip everything except the static "Extractive" option
     [...sel.options].forEach(o => { if (o.value !== 'extractive') o.remove(); });
-
-    if (installed.length) {
-      const optgroup = document.createElement('optgroup');
-      optgroup.label = ollama.available ? 'Ollama (local)' : 'Ollama (offline?)';
-      installed.forEach(m => {
-        const opt = document.createElement('option');
-        opt.value = `ollama/${m}`;
-        opt.textContent = m;
-        if (m === defaultOllama || m === `${defaultOllama}:latest`) {
-          opt.textContent += '  (default)';
-          opt.dataset.isDefault = '1';
-        }
-        optgroup.appendChild(opt);
-      });
-      sel.appendChild(optgroup);
-    } else if (ollama.endpoint) {
-      const opt = document.createElement('option');
-      opt.value = 'ollama'; opt.disabled = true;
-      opt.textContent = 'Ollama — no models installed';
-      sel.appendChild(opt);
-    }
 
     if (claude.available) {
       const opt = document.createElement('option');
@@ -121,16 +164,15 @@ async function populateProviderDropdowns() {
       const opt = document.createElement('option');
       opt.value = 'nim';
       opt.textContent = `NVIDIA NIM (${nim.model})`;
+      opt.dataset.isDefault = '1';
       sel.appendChild(opt);
     }
 
-    // Auto-select the configured default Ollama model if there is one
-    if (status.configured_provider === 'ollama' && installed.length) {
-      const def = [...sel.options].find(o => o.dataset.isDefault === '1');
-      if (def) sel.value = def.value;
-    }
+    // Default to NIM (free tier) if available, else Claude, else extractive.
+    const def = [...sel.options].find(o => o.dataset.isDefault === '1');
+    if (def) sel.value = def.value;
   }
-  console.log('[providers] dropdown populated with', installed.length, 'Ollama models');
+  console.log('[providers] dropdown populated');
 }
 populateProviderDropdowns().catch(err => {
   console.error('[providers] populate failed:', err);
@@ -295,7 +337,7 @@ async function _onMergeClick() {
   if (btn) { btn.disabled = true; btn.textContent = 'Merging…'; }
   console.log('[KGraph] POST /api/v1/graph_dedup with', labels.length, 'labels, provider:', provider);
   try {
-    const r = await fetch(`${API}/api/v1/graph_dedup`, {
+    const r = await apiFetch(`${API}/api/v1/graph_dedup`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ labels, llm_provider: provider }),
@@ -365,7 +407,7 @@ async function _extractGraph(query, response, citations) {
 
   if (_isGraphPanelOpen()) _showGraphSpinner(true);
   try {
-    const r = await fetch(`${API}/api/v1/graph_extract`, {
+    const r = await apiFetch(`${API}/api/v1/graph_extract`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ query, answer: cleanAnswer, chunks, llm_provider: provider }),
@@ -539,9 +581,8 @@ async function sendConsumerMessage() {
     const provider = document.getElementById('consumer-provider').value;
     const simple   = document.getElementById('consumer-simple').checked;
 
-    const r = await fetch(`${API}/api/v1/query`, {
+    const r = await apiFetch(`${API}/api/v1/query`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         query,
         options: { top_k: 12, retrieval_strategy: 'full', llm_provider: provider, plain_language: simple },
@@ -773,9 +814,8 @@ async function sendProQuery() {
   responseBox.hidden = true;
 
   try {
-    const r = await fetch(`${API}/api/v1/query`, {
+    const r = await apiFetch(`${API}/api/v1/query`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
     if (!r.ok) {

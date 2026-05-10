@@ -29,6 +29,10 @@ from pydantic import BaseModel, Field
 from ..search.elasticsearch_client import get_client as get_es_client, ensure_index
 from ..search.hybrid_retriever import HybridRetriever
 from ..search.mesh_expander import MeSHExpander
+from .auth import (
+    KeyRecord, bootstrap_admin_key, generate_child_key, init_keys_table,
+    require_api_key,
+)
 from .classifier import classify_query
 from .citation_verifier import verify_citations, warnings_to_dicts
 from .drug_lookup import lookup_drugs_for_query
@@ -168,10 +172,22 @@ class GraphDedupRequest(BaseModel):
 
 # ─── Endpoints ───────────────────────────────────────────────────────────────
 
+@app.on_event("startup")
+async def _startup_init_auth() -> None:
+    """Bootstrap the api_keys table + admin key on first run."""
+    try:
+        with psycopg.connect(DB_DSN) as conn:
+            init_keys_table(conn)
+            bootstrap_admin_key(conn)   # logs the key on first run
+    except Exception as exc:
+        logger.error("Failed to initialise api_keys table: %s", exc)
+
+
 @app.post("/api/v1/query")
 async def query(
     req: QueryRequest,
     retriever: Annotated[HybridRetriever, Depends(get_retriever)],
+    _key: Annotated[KeyRecord, Depends(require_api_key)] = None,
 ) -> dict[str, Any]:
     """Main Q&A endpoint: retrieve relevant passages and return a cited response."""
     start = time.monotonic()
@@ -317,7 +333,10 @@ async def query(
 
 
 @app.post("/api/v1/graph_extract")
-async def graph_extract(req: GraphExtractRequest) -> dict[str, Any]:
+async def graph_extract(
+    req: GraphExtractRequest,
+    _key: Annotated[KeyRecord, Depends(require_api_key)] = None,
+) -> dict[str, Any]:
     """Per-turn knowledge-graph payload for the chat panel.
 
     Called by the frontend AFTER the answer renders. Runs biomedical NER
@@ -345,7 +364,10 @@ async def graph_extract(req: GraphExtractRequest) -> dict[str, Any]:
 
 
 @app.post("/api/v1/graph_dedup")
-async def graph_dedup(req: GraphDedupRequest) -> dict[str, Any]:
+async def graph_dedup(
+    req: GraphDedupRequest,
+    _key: Annotated[KeyRecord, Depends(require_api_key)] = None,
+) -> dict[str, Any]:
     """Dedup equivalent biomedical entity labels via the LLM.
 
     Frontend sends the current node labels; we call the LLM to group
@@ -361,6 +383,39 @@ async def graph_dedup(req: GraphDedupRequest) -> dict[str, Any]:
             detail=f"graph_dedup failed: {type(exc).__name__}: {exc}",
         )
     return {"groups": [g.to_dict() for g in groups]}
+
+
+# ─── Key management ───────────────────────────────────────────────────────────
+
+
+@app.get("/api/v1/keys/me")
+async def keys_me(
+    key: Annotated[KeyRecord, Depends(require_api_key)],
+    db: Annotated[psycopg.Connection, Depends(get_db)],
+) -> dict:
+    """Tell the caller about their key (admin? how many children?)."""
+    from .auth import child_count
+    return {
+        "is_admin": key.is_admin,
+        "children_minted": child_count(db, key.id),
+        "can_mint_more": key.is_admin or child_count(db, key.id) < 1,
+        "note": key.note,
+    }
+
+
+class KeyMintRequest(BaseModel):
+    note: str | None = Field(default=None, max_length=200)
+
+
+@app.post("/api/v1/keys/generate")
+async def keys_generate(
+    req: KeyMintRequest,
+    key: Annotated[KeyRecord, Depends(require_api_key)],
+    db: Annotated[psycopg.Connection, Depends(get_db)],
+) -> dict:
+    """Mint a child key. Admin = unlimited; non-admin = exactly one."""
+    new_key = generate_child_key(db, key, note=req.note)
+    return {"key": new_key, "note": req.note}
 
 
 @app.get("/api/v1/papers/{pmid}")
@@ -565,33 +620,12 @@ async def reload_hipporag() -> dict:
 @app.get("/api/v1/llm/status")
 async def llm_status() -> dict:
     """Report which providers are configured and reachable."""
-    import httpx
-
     out: dict[str, Any] = {
         "configured_provider": os.environ.get("LLM_PROVIDER", "extractive"),
         "providers": {},
     }
 
     out["providers"]["extractive"] = {"available": True, "model": "extractive"}
-
-    # Ollama: ping /api/tags and report current default model
-    ollama_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-    ollama_model = os.environ.get("OLLAMA_MODEL", "biomistral")
-    try:
-        with httpx.Client(timeout=2.0) as c:
-            r = c.get(f"{ollama_url}/api/tags")
-            installed = [m["name"] for m in r.json().get("models", [])] if r.status_code == 200 else []
-        out["providers"]["ollama"] = {
-            "available": ollama_model in installed or f"{ollama_model}:latest" in installed,
-            "model": ollama_model,
-            "installed_models": installed,
-            "endpoint": ollama_url,
-        }
-    except Exception as exc:
-        out["providers"]["ollama"] = {
-            "available": False, "model": ollama_model, "error": str(exc),
-            "endpoint": ollama_url,
-        }
 
     out["providers"]["claude"] = {
         "available": bool(os.environ.get("ANTHROPIC_API_KEY", "").strip()

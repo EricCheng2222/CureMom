@@ -174,20 +174,17 @@ def _build_user_message(query: str, answer: str) -> str:
 def _resolve_provider(provider_spec: str | None) -> str:
     """Decide which provider to actually call based on the dropdown.
 
-    Returns "ollama", "claude", "openai", "nim", or "ollama" as the safe
-    default for "extractive" / unknown.
+    Defaults to "nim" (free tier MiniMax) when no provider is specified.
     """
     if not provider_spec:
-        return "ollama"
-    if provider_spec.startswith("ollama/") or provider_spec == "ollama":
-        return "ollama"
+        return "nim"
     if provider_spec == "claude":
         return "claude"
     if provider_spec == "openai":
         return "openai"
     if provider_spec.startswith("nim/") or provider_spec == "nim":
         return "nim"
-    return "ollama"
+    return "nim"
 
 
 def _llm_graph(
@@ -199,10 +196,10 @@ def _llm_graph(
     """Dispatch the graph-extract LLM call to whichever provider the user
     picked in the dropdown. Returns the parsed {entities, relations}.
 
-    Tunable via env (Ollama path):
-      OLLAMA_GRAPH_MODEL    — override model (default = OLLAMA_MODEL)
-      GRAPH_NUM_CTX         — context tokens (default 16384)
-      GRAPH_TIMEOUT_S       — request timeout (default 600s = 10 min)
+    Defaults to NIM (free tier) when no provider is specified.
+
+    Tunable via env:
+      GRAPH_TIMEOUT_S — request timeout (default 600s = 10 min)
     """
     if timeout_s is None:
         timeout_s = float(os.environ.get("GRAPH_TIMEOUT_S", "600"))
@@ -214,36 +211,7 @@ def _llm_graph(
         return _claude_graph(user_msg, timeout_s)
     if target == "openai":
         return _openai_graph(user_msg, timeout_s)
-    if target == "nim":
-        return _nim_graph(user_msg, provider_spec, timeout_s)
-    return _ollama_graph(user_msg, provider_spec, timeout_s)
-
-
-def _ollama_graph(user_msg: str, provider_spec: str | None, timeout_s: float) -> dict[str, Any]:
-    base = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-    if provider_spec and provider_spec.startswith("ollama/"):
-        model = provider_spec.split("/", 1)[1]
-    else:
-        model = os.environ.get("OLLAMA_GRAPH_MODEL") or os.environ.get("OLLAMA_MODEL", "medgemma:4b")
-    num_ctx = int(os.environ.get("GRAPH_NUM_CTX", "16384"))
-
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": _GRAPH_PROMPT},
-            {"role": "user", "content": user_msg},
-        ],
-        "stream": False,
-        "format": "json",
-        "options": {"num_ctx": num_ctx, "temperature": 0.0},
-    }
-
-    logger.info("graph_extract: calling Ollama (model=%s, num_ctx=%d, timeout=%.0fs)", model, num_ctx, timeout_s)
-    with httpx.Client(timeout=timeout_s) as client:
-        r = client.post(f"{base}/api/chat", json=payload)
-        r.raise_for_status()
-        raw = r.json()["message"]["content"]
-    return _parse_graph(raw)
+    return _nim_graph(user_msg, provider_spec, timeout_s)
 
 
 def _claude_graph(user_msg: str, timeout_s: float) -> dict[str, Any]:

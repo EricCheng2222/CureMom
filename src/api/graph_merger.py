@@ -88,10 +88,10 @@ def dedup_entities(
     """Ask the LLM to group equivalent biomedical entity labels.
 
     Routes to the same provider the user picked in the dropdown:
-      ollama/<model> → Ollama JSON mode
       claude         → Anthropic Messages API
       openai         → OpenAI chat completions (json_object mode)
-      else / extractive → falls back to Ollama default
+      nim / nim/<m>  → NVIDIA NIM (OpenAI-compatible)
+      else           → defaults to NIM (free tier)
 
     Returns a list of MergeGroup (each with ≥2 members). Groups whose
     members aren't all in the input list are dropped (no invented
@@ -109,52 +109,22 @@ def dedup_entities(
         raw = _claude_dedup(user_msg, timeout_s)
     elif target == "openai":
         raw = _openai_dedup(user_msg, timeout_s)
-    elif target == "nim":
-        raw = _nim_dedup(user_msg, provider_spec, timeout_s)
     else:
-        raw = _ollama_dedup(user_msg, provider_spec, timeout_s)
+        raw = _nim_dedup(user_msg, provider_spec, timeout_s)
 
     return _parse_groups(raw, allowed=set(labels))
 
 
 def _resolve_provider(provider_spec: str | None) -> str:
     if not provider_spec:
-        return "ollama"
-    if provider_spec.startswith("ollama/") or provider_spec == "ollama":
-        return "ollama"
+        return "nim"
     if provider_spec == "claude":
         return "claude"
     if provider_spec == "openai":
         return "openai"
     if provider_spec.startswith("nim/") or provider_spec == "nim":
         return "nim"
-    return "ollama"
-
-
-def _ollama_dedup(user_msg: str, provider_spec: str | None, timeout_s: float) -> str:
-    base = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-    if provider_spec and provider_spec.startswith("ollama/"):
-        model = provider_spec.split("/", 1)[1]
-    else:
-        model = os.environ.get("OLLAMA_GRAPH_MODEL") or os.environ.get("OLLAMA_MODEL", "medgemma:4b")
-    num_ctx = int(os.environ.get("GRAPH_NUM_CTX", "16384"))
-
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": _DEDUP_PROMPT},
-            {"role": "user", "content": user_msg},
-        ],
-        "stream": False,
-        "format": "json",
-        "options": {"num_ctx": num_ctx, "temperature": 0.0},
-    }
-
-    logger.info("graph_dedup: calling Ollama (model=%s, timeout=%.0fs)", model, timeout_s)
-    with httpx.Client(timeout=timeout_s) as client:
-        r = client.post(f"{base}/api/chat", json=payload)
-        r.raise_for_status()
-        return r.json()["message"]["content"]
+    return "nim"
 
 
 def _claude_dedup(user_msg: str, timeout_s: float) -> str:

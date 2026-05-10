@@ -254,73 +254,6 @@ class ExtractiveProvider(LLMProvider):
         )
 
 
-class OllamaProvider(LLMProvider):
-    """Local LLM via Ollama."""
-
-    def __init__(
-        self,
-        base_url: str = "http://localhost:11434",
-        model: str = "biomistral",
-    ) -> None:
-        self._base_url = base_url.rstrip("/")
-        self._model = model
-
-    @property
-    def name(self) -> str:
-        return f"ollama/{self._model}"
-
-    def synthesize(
-        self,
-        query: str,
-        chunks: list[RetrievedChunk],
-        plain_language: bool = False,
-        drug_cards: list[str] | None = None,
-        history: list[dict] | None = None,
-    ) -> SynthesisResult:
-        context = _build_context_block(chunks, drug_cards=drug_cards)
-        user_message = f"Context passages:\n\n{context}\n\nQuestion: {query}"
-
-        payload = {
-            "model": self._model,
-            "messages": _build_messages(
-                _select_system_prompt(plain_language), user_message, history,
-            ),
-            "stream": False,
-            # 32K window — Gemma 4 supports long context; large enough that
-            # 8+ chunks (each ~500 tokens) fit with room for system prompt,
-            # question, and response. First request reloads the model (~10s).
-            "options": {"num_ctx": 32768},
-        }
-
-        # Generous timeout: first call reloads model with new context window;
-        # local 7B on M-series typically generates 30-60 tokens/sec.
-        with httpx.Client(timeout=httpx.Timeout(connect=10.0, read=600.0, write=10.0, pool=10.0)) as client:
-            response = client.post(f"{self._base_url}/api/chat", json=payload)
-            if response.status_code != 200:
-                # Surface Ollama's actual error message (e.g. "model 'X' not found")
-                try:
-                    detail = response.json().get("error", response.text)
-                except Exception:
-                    detail = response.text
-                raise RuntimeError(
-                    f"Ollama {response.status_code}: {detail} "
-                    f"(model={self._model!r}; check `ollama list`)"
-                )
-            data = response.json()
-
-        raw = data["message"]["content"]
-        indices = _parse_citation_indices(raw)
-        cited_ids = [chunks[i - 1].chunk_id for i in indices if 1 <= i <= len(chunks)]
-
-        return SynthesisResult(
-            response_text=raw,
-            citation_indices=indices,
-            cited_chunk_ids=cited_ids,
-            model_used=self.name,
-            raw_response=raw,
-        )
-
-
 class ClaudeProvider(LLMProvider):
     """Anthropic Claude API."""
 
@@ -507,11 +440,11 @@ class NIMProvider(LLMProvider):
 def get_provider(provider_spec: str | None = None) -> LLMProvider:
     """Factory: return the appropriate LLMProvider.
 
-    `provider_spec` is either a bare provider name ("extractive", "ollama",
+    `provider_spec` is either a bare provider name ("extractive",
     "claude", "openai", "nim") or a provider/model override
-    ("ollama/medgemma:4b", "claude/claude-haiku-4-5", "nim/minimaxai/minimax-m2.7").
-    When no model is specified, the corresponding env var is used
-    (OLLAMA_MODEL / CLAUDE_MODEL / OPENAI_MODEL / NIM_MODEL).
+    ("claude/claude-haiku-4-5", "nim/minimaxai/minimax-m2.7"). When no
+    model is specified, the corresponding env var is used (CLAUDE_MODEL
+    / OPENAI_MODEL / NIM_MODEL).
     """
     spec = provider_spec or os.environ.get("LLM_PROVIDER", "extractive")
     head, _, model_override = spec.partition("/")
@@ -520,12 +453,6 @@ def get_provider(provider_spec: str | None = None) -> LLMProvider:
 
     if head == "extractive":
         return ExtractiveProvider()
-
-    if head == "ollama":
-        return OllamaProvider(
-            base_url=os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434"),
-            model=model_override or os.environ.get("OLLAMA_MODEL", "biomistral"),
-        )
 
     if head == "claude":
         return ClaudeProvider(
@@ -543,6 +470,6 @@ def get_provider(provider_spec: str | None = None) -> LLMProvider:
         )
 
     raise ValueError(
-        f"Unknown LLM provider: {head!r}. Choose: extractive, ollama[/<model>], "
+        f"Unknown LLM provider: {head!r}. Choose: extractive, "
         "claude[/<model>], openai[/<model>], nim[/<model>]"
     )
