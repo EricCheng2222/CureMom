@@ -277,8 +277,13 @@ function setupKnowledgeGraph() {
   const panel = document.getElementById('graph-panel');
   if (!panel) return;
   const savedPref = localStorage.getItem(GRAPH_PREF_KEY);
-  const startOpen = savedPref === null ? true : savedPref === '1';
+  // Narrow viewports (iPad portrait) — default the graph panel to closed
+  // since the chat area gets cramped. User can still toggle it open.
+  const isNarrow = window.matchMedia('(max-width: 900px)').matches;
+  const defaultOpen = !isNarrow;
+  const startOpen = savedPref === null ? defaultOpen : savedPref === '1';
   if (startOpen) panel.classList.remove('collapsed');
+  else panel.classList.add('collapsed');
   document.getElementById('graph-toggle-btn')?.classList.toggle('active', startOpen);
 
   // Cytoscape init is purely lazy — happens on first _extractGraph call OR

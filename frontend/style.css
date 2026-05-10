@@ -201,6 +201,9 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); }
   flex: 1;
   overflow: hidden;
   height: 100vh;
+  /* dvh accounts for iOS Safari's collapsing toolbar — without it,
+     the bottom of the chat input gets hidden behind the URL bar. */
+  height: 100dvh;
   background: var(--bg);
 }
 
@@ -629,13 +632,16 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); }
   background: none;
   border: none;
   outline: none;
-  font-size: 14.5px;
+  /* 16px or larger — anything smaller makes iOS Safari auto-zoom on focus,
+     which is jarring on iPad and breaks the layout. */
+  font-size: 16px;
   font-family: var(--font);
   line-height: 1.55;
   color: var(--text);
   resize: none;
   max-height: 140px;
   overflow-y: auto;
+  -webkit-appearance: none;
 }
 .chat-ta::placeholder { color: var(--muted); }
 .send-btn {
@@ -1376,11 +1382,43 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); }
 }
 
 /* ═══════════════════════════════════════════════════════ RESPONSIVE ══════ */
+
+/* Phone-sized: hide everything but chat */
 @media (max-width: 700px) {
   .sidebar { display: none; }
   .land-h1 { letter-spacing: -.8px; }
   .graph-panel { display: none !important; }
 }
-@media (max-width: 1100px) {
-  .graph-panel { max-width: 50%; min-width: 320px; }
+
+/* iPad portrait + landscape (700-1180px): keep sidebar but tighten the
+   layout. The graph panel stays toggleable via the topbar button. */
+@media (max-width: 1180px) and (min-width: 701px) {
+  .sidebar { width: 200px; }
+  .graph-panel { max-width: 55%; min-width: 320px; }
+  /* Bigger tap targets — 44px is Apple's HIG minimum */
+  .send-btn { width: 42px; height: 42px; }
+  .graph-action-btn,
+  .graph-icon-btn,
+  .example-btn,
+  .share-btn,
+  .back-btn,
+  .topbar-mode-btn,
+  .topbar-graph-btn { min-height: 36px; }
+  /* When the graph is open on iPad portrait the chat area gets cramped;
+     give the user a bit more room by collapsing the side padding. */
+  .messages { padding: 12px 12px 0; }
+  .chat-input-bar { padding: 10px 12px; }
 }
+
+/* iPad portrait specifically (820/834): the JS defaults the graph panel
+   to .collapsed at this width on first load, so .graph-panel.collapsed
+   { display: none } from the base styles takes over. Nothing to add
+   here — left as a marker for the breakpoint that matters. */
+
+/* Touch-device hover suppression — iPad supports hover via Pencil/trackpad,
+   but pure-touch users shouldn't see sticky hover states after tap. */
+@media (hover: none) {
+  *:hover { transition: none; }
+  button { -webkit-tap-highlight-color: transparent; }
+}
+
