@@ -513,7 +513,7 @@ def query_stream(
             yield evt("error", detail=f"{type(exc).__name__}: {exc}", status=502)
 
     return StreamingResponse(
-        _with_heartbeat(gen(), interval_s=15),
+        _with_heartbeat(gen(), interval_s=3),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
