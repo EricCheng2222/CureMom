@@ -96,12 +96,56 @@ def esearch_pmids(
     date_from: str | None = None,
     date_to: str | None = None,
 ) -> list[str]:
-    """Return all PMIDs matching a query via ESearch (handles pagination)."""
+    """Return all PMIDs matching a query via ESearch (handles pagination).
+
+    NCBI caps a single ESearch at 9,999 PMIDs even with retstart pagination.
+    When the count exceeds that, we recursively halve the date range until
+    each window is under the cap. If the caller didn't supply a date range
+    and the count is too big, we default to splitting from 1900 to today.
+    """
+    from datetime import date
+
+    cap = 9999
+
+    def _do_count(df: str | None, dt: str | None) -> tuple[int, str, str]:
+        # Returns (count, web_env, query_key) for the window.
+        return _esearch_count(client, config, query, df, dt)
+
+    count, web_env, query_key = _do_count(date_from, date_to)
+    logger.info(
+        "ESearch found %d results for query (date_from=%s, date_to=%s): %s",
+        count, date_from or "*", date_to or "*", query,
+    )
+    if count == 0:
+        return []
+
+    if count > cap:
+        # Need to split. Default the window if open-ended so we have edges
+        # to halve. PubMed's earliest record is from 1781; 1900 is fine as
+        # a lower bound for biomedical lit and keeps year-math simple.
+        df = date_from or "1900/01/01"
+        dt = date_to or date.today().strftime("%Y/%m/%d")
+        return _split_and_collect(client, config, query, df, dt, cap)
+
+    # Single-window pagination path.
+    return _esearch_pages(client, config, query, web_env, query_key, count)
+
+
+def _esearch_count(
+    client: httpx.Client,
+    config: PipelineConfig,
+    query: str,
+    date_from: str | None,
+    date_to: str | None,
+) -> tuple[int, str, str]:
+    """Just get count + history-server tokens. Retries on backend error."""
+    from lxml import etree
+
     params = {
         **config.ncbi_params(),
         "db": "pubmed",
         "term": query,
-        "retmax": "0",  # first pass: get total count
+        "retmax": "0",
         "usehistory": "y",
     }
     if date_from:
@@ -109,12 +153,9 @@ def esearch_pmids(
     if date_to:
         params["maxdate"] = date_to
 
+    import time
     from lxml import etree
 
-    # PubMed eutils flaps occasionally — backend returns
-    # `<ERROR>Search Backend failed: …</ERROR>` and no <Count>. Without
-    # retry we'd silently treat that as 0 hits and skip the topic. Three
-    # attempts with growing backoff covers ~95% of flap windows.
     last_err: str | None = None
     for attempt in range(1, 4):
         config.throttle()
@@ -128,22 +169,28 @@ def esearch_pmids(
                 "ESearch backend error (attempt %d/3): %s — retrying in %ds",
                 attempt, err, wait,
             )
-            import time
             time.sleep(wait)
             continue
-        break
-    else:
-        raise RuntimeError(
-            f"NCBI esearch kept returning <ERROR> after 3 attempts: {last_err}"
-        )
+        count = int((root.findtext("Count") or "0"))
+        web_env = root.findtext("WebEnv") or ""
+        query_key = root.findtext("QueryKey") or ""
+        return count, web_env, query_key
+    raise RuntimeError(
+        f"NCBI esearch count kept returning <ERROR> after 3 attempts: {last_err}"
+    )
 
-    count = int((root.findtext("Count") or "0"))
-    web_env = root.findtext("WebEnv") or ""
-    query_key = root.findtext("QueryKey") or ""
-    logger.info("ESearch found %d results for query: %s", count, query)
 
-    if count == 0:
-        return []
+def _esearch_pages(
+    client: httpx.Client,
+    config: PipelineConfig,
+    query: str,
+    web_env: str,
+    query_key: str,
+    count: int,
+) -> list[str]:
+    """Page through a history-server result that's known to be ≤ 9,999."""
+    import time
+    from lxml import etree
 
     all_pmids: list[str] = []
     retstart = 0
@@ -158,16 +205,9 @@ def esearch_pmids(
             "retstart": str(retstart),
             "retmax": str(page_size),
             "rettype": "uilist",
-            # Note: NCBI ignores retmode=text for history-server queries and always
-            # returns XML — parse <Id> elements instead of splitting on newlines.
         }
-        # Per-page retry: NCBI's history-server flap can hit individual
-        # pages mid-pagination — without retry we'd silently accept an
-        # empty page and cap the topic at one good page (the bug that
-        # left missense / respiratory / fever / gi at 9999 each).
         page_pmids: list[str] | None = None
         last_err: str | None = None
-        import time
         for attempt in range(1, 4):
             config.throttle()
             response = _ncbi_get(client, ESEARCH_URL, fetch_params)
@@ -194,6 +234,59 @@ def esearch_pmids(
         logger.info("Fetched %d/%d PMIDs", len(all_pmids), count)
 
     return all_pmids
+
+
+def _split_and_collect(
+    client: httpx.Client,
+    config: PipelineConfig,
+    query: str,
+    date_from: str,
+    date_to: str,
+    cap: int,
+) -> list[str]:
+    """Recursively halve [date_from, date_to] until each window is ≤ cap,
+    then page-fetch each window and concatenate. PMIDs may repeat across
+    windows in edge cases (papers indexed twice with different dates) —
+    final dedup is handled at queue-insert (UNIQUE constraint).
+    """
+    from datetime import date, datetime, timedelta
+
+    def _parse(s: str) -> date:
+        return datetime.strptime(s, "%Y/%m/%d").date()
+
+    def _fmt(d: date) -> str:
+        return d.strftime("%Y/%m/%d")
+
+    df = _parse(date_from)
+    dt = _parse(date_to)
+    if df > dt:
+        return []
+
+    count, web_env, query_key = _esearch_count(client, config, query, _fmt(df), _fmt(dt))
+    logger.info(
+        "  window %s..%s → %d PMIDs", _fmt(df), _fmt(dt), count,
+    )
+    if count == 0:
+        return []
+    if count <= cap:
+        return _esearch_pages(client, config, query, web_env, query_key, count)
+
+    # Single-day window that's still over the cap — can't split further;
+    # accept the truncation but log loudly.
+    if df == dt:
+        logger.warning(
+            "Window %s alone has %d PMIDs (> cap of %d); first %d will be "
+            "kept, the rest lost. Narrow the query if you need full coverage.",
+            _fmt(df), count, cap, cap,
+        )
+        return _esearch_pages(client, config, query, web_env, query_key, cap)
+
+    # Halve the range. Midpoint is the floor.
+    days = (dt - df).days
+    mid = df + timedelta(days=days // 2)
+    left = _split_and_collect(client, config, query, _fmt(df), _fmt(mid), cap)
+    right = _split_and_collect(client, config, query, _fmt(mid + timedelta(days=1)), _fmt(dt), cap)
+    return left + right
 
 
 def efetch_batch(
