@@ -239,19 +239,32 @@ def _build_user_message(query: str, answer: str) -> str:
 
 
 def _resolve_provider(provider_spec: str | None) -> str:
-    """Decide which provider to actually call based on the dropdown.
+    """Decide which provider to call based on the dropdown value.
 
-    Defaults to "nim" (free tier MiniMax) when no provider is specified.
+    Accepts both bare provider names (`claude`, `openai`, `nim`) AND
+    `<provider>/<model>` forms (`claude/claude-haiku-4-5-20251001`,
+    `openai/gpt-4o`, `nim/meta/llama-3.1-70b-instruct`). The model after
+    the slash is extracted by _llm_graph and threaded into the provider
+    helper — _resolve_provider only decides routing.
+
+    NOTE: prior versions only matched bare names — anything with a slash
+    silently fell through to `nim`. That meant picking Claude Haiku in
+    the dropdown actually routed to NIM. Fixed.
     """
     if not provider_spec:
         return "nim"
-    if provider_spec == "claude":
-        return "claude"
-    if provider_spec == "openai":
-        return "openai"
-    if provider_spec.startswith("nim/") or provider_spec == "nim":
-        return "nim"
+    head = provider_spec.split("/", 1)[0].strip().lower()
+    if head in ("claude", "openai", "nim"):
+        return head
     return "nim"
+
+
+def _model_override(provider_spec: str | None) -> str | None:
+    """Extract the model name after the first `/` in the provider spec, or
+    None if no model was specified."""
+    if not provider_spec or "/" not in provider_spec:
+        return None
+    return provider_spec.split("/", 1)[1].strip() or None
 
 
 def _llm_graph(
@@ -273,15 +286,16 @@ def _llm_graph(
 
     user_msg = _build_user_message(query, answer)
     target = _resolve_provider(provider_spec)
+    model_override = _model_override(provider_spec)
 
     if target == "claude":
-        return _claude_graph(user_msg, timeout_s)
+        return _claude_graph(user_msg, timeout_s, model=model_override)
     if target == "openai":
-        return _openai_graph(user_msg, timeout_s)
-    return _nim_graph(user_msg, provider_spec, timeout_s)
+        return _openai_graph(user_msg, timeout_s, model=model_override)
+    return _nim_graph(user_msg, model_override, timeout_s)
 
 
-def _claude_graph(user_msg: str, timeout_s: float) -> dict[str, Any]:
+def _claude_graph(user_msg: str, timeout_s: float, model: str | None = None) -> dict[str, Any]:
     """Call Anthropic's Messages API directly. Anthropic doesn't have a
     strict format=json mode like Ollama, but Haiku reliably returns clean
     JSON when the system prompt instructs it to."""
@@ -290,7 +304,7 @@ def _claude_graph(user_msg: str, timeout_s: float) -> dict[str, Any]:
     api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
     if not api_key or api_key == "your_anthropic_api_key_here":
         raise RuntimeError("ANTHROPIC_API_KEY not set in env")
-    model = os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
+    model = model or os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
 
     logger.info("graph_extract: calling Claude (model=%s, timeout=%.0fs)", model, timeout_s)
     client = anthropic.Anthropic(api_key=api_key, timeout=timeout_s)
@@ -312,14 +326,14 @@ def _claude_graph(user_msg: str, timeout_s: float) -> dict[str, Any]:
     return _parse_graph(raw)
 
 
-def _openai_graph(user_msg: str, timeout_s: float) -> dict[str, Any]:
+def _openai_graph(user_msg: str, timeout_s: float, model: str | None = None) -> dict[str, Any]:
     """Call OpenAI's chat completions with response_format=json_object."""
     import openai
 
     api_key = os.environ.get("OPENAI_API_KEY", "").strip()
     if not api_key or api_key == "your_openai_api_key_here":
         raise RuntimeError("OPENAI_API_KEY not set in env")
-    model = os.environ.get("OPENAI_MODEL", "gpt-4o")
+    model = model or os.environ.get("OPENAI_MODEL", "gpt-4o")
 
     logger.info("graph_extract: calling OpenAI (model=%s, timeout=%.0fs)", model, timeout_s)
     client = openai.OpenAI(api_key=api_key, timeout=timeout_s)
@@ -342,23 +356,25 @@ def _openai_graph(user_msg: str, timeout_s: float) -> dict[str, Any]:
     return _parse_graph(raw)
 
 
-def _nim_graph(user_msg: str, provider_spec: str | None, timeout_s: float) -> dict[str, Any]:
+def _nim_graph(user_msg: str, model: str | None, timeout_s: float) -> dict[str, Any]:
     """Call NVIDIA NIM (OpenAI-compatible) chat completions.
 
     Uses the OpenAI SDK with a custom base_url. We rely on prompt-based
     JSON output (system prompt says "output ONLY this JSON") rather than
-    response_format=json_object, since NIM's MiniMax-M2.7 doesn't reliably
-    accept that flag — _parse_graph extracts the JSON object via regex.
+    response_format=json_object, since some NIM-hosted models don't
+    reliably accept that flag — _parse_graph extracts the JSON object via
+    regex.
+
+    `model` is the per-request override (e.g. `meta/llama-3.1-70b-instruct`
+    pulled from the `nim/<model>` dropdown spec). Falls back to the env
+    default when None.
     """
     import openai
 
     api_key = os.environ.get("NVIDIA_API_KEY", "").strip()
     if not api_key or api_key == "your_nvidia_api_key_here":
         raise RuntimeError("NVIDIA_API_KEY not set in env")
-    if provider_spec and provider_spec.startswith("nim/"):
-        model = provider_spec.split("/", 1)[1]
-    else:
-        model = os.environ.get("NIM_MODEL", "meta/llama-3.1-70b-instruct")
+    model = model or os.environ.get("NIM_MODEL", "meta/llama-3.1-70b-instruct")
     base_url = os.environ.get("NIM_BASE_URL", "https://integrate.api.nvidia.com/v1")
 
     logger.info("graph_extract: calling NIM (model=%s, timeout=%.0fs)", model, timeout_s)

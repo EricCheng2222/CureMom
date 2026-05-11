@@ -108,39 +108,47 @@ def dedup_entities(
 
     user_msg = f"Labels ({len(labels)}):\n" + "\n".join(f"- {lbl}" for lbl in labels)
     target = _resolve_provider(provider_spec)
+    model_override = _model_override(provider_spec)
 
     # Heartbeat: tick elapsed_s on the job every 500 ms so the client can
     # show "Merging… Ns" instead of a frozen button while the LLM runs.
     with emit_heartbeat(update, stage="dedup_entities"):
         if target == "claude":
-            raw = _claude_dedup(user_msg, timeout_s)
+            raw = _claude_dedup(user_msg, timeout_s, model=model_override)
         elif target == "openai":
-            raw = _openai_dedup(user_msg, timeout_s)
+            raw = _openai_dedup(user_msg, timeout_s, model=model_override)
         else:
-            raw = _nim_dedup(user_msg, provider_spec, timeout_s)
+            raw = _nim_dedup(user_msg, model_override, timeout_s)
 
     return _parse_groups(raw, allowed=set(labels))
 
 
 def _resolve_provider(provider_spec: str | None) -> str:
+    """See graph_extractor._resolve_provider — same logic. Bare `claude` /
+    `openai` / `nim` and `<provider>/<model>` forms both route correctly.
+    Anything unrecognized falls back to nim.
+    """
     if not provider_spec:
         return "nim"
-    if provider_spec == "claude":
-        return "claude"
-    if provider_spec == "openai":
-        return "openai"
-    if provider_spec.startswith("nim/") or provider_spec == "nim":
-        return "nim"
+    head = provider_spec.split("/", 1)[0].strip().lower()
+    if head in ("claude", "openai", "nim"):
+        return head
     return "nim"
 
 
-def _claude_dedup(user_msg: str, timeout_s: float) -> str:
+def _model_override(provider_spec: str | None) -> str | None:
+    if not provider_spec or "/" not in provider_spec:
+        return None
+    return provider_spec.split("/", 1)[1].strip() or None
+
+
+def _claude_dedup(user_msg: str, timeout_s: float, model: str | None = None) -> str:
     import anthropic
 
     api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
     if not api_key or api_key == "your_anthropic_api_key_here":
         raise RuntimeError("ANTHROPIC_API_KEY not set in env")
-    model = os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
+    model = model or os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
 
     logger.info("graph_dedup: calling Claude (model=%s, timeout=%.0fs)", model, timeout_s)
     client = anthropic.Anthropic(api_key=api_key, timeout=timeout_s)
@@ -153,13 +161,13 @@ def _claude_dedup(user_msg: str, timeout_s: float) -> str:
     return msg.content[0].text if msg.content else ""
 
 
-def _openai_dedup(user_msg: str, timeout_s: float) -> str:
+def _openai_dedup(user_msg: str, timeout_s: float, model: str | None = None) -> str:
     import openai
 
     api_key = os.environ.get("OPENAI_API_KEY", "").strip()
     if not api_key or api_key == "your_openai_api_key_here":
         raise RuntimeError("OPENAI_API_KEY not set in env")
-    model = os.environ.get("OPENAI_MODEL", "gpt-4o")
+    model = model or os.environ.get("OPENAI_MODEL", "gpt-4o")
 
     logger.info("graph_dedup: calling OpenAI (model=%s, timeout=%.0fs)", model, timeout_s)
     client = openai.OpenAI(api_key=api_key, timeout=timeout_s)
@@ -175,7 +183,7 @@ def _openai_dedup(user_msg: str, timeout_s: float) -> str:
     return resp.choices[0].message.content or ""
 
 
-def _nim_dedup(user_msg: str, provider_spec: str | None, timeout_s: float) -> str:
+def _nim_dedup(user_msg: str, model: str | None, timeout_s: float) -> str:
     """Call NIM (OpenAI-compatible) for dedup.
 
     The NIM_MODEL default is `meta/llama-3.1-70b-instruct` — a non-reasoning
@@ -184,16 +192,16 @@ def _nim_dedup(user_msg: str, provider_spec: str | None, timeout_s: float) -> st
     doesn't honor any of the standard "disable thinking" knobs. Users who
     explicitly want a reasoning model can pick `nim/minimaxai/minimax-m2.7`
     in the dropdown.
+
+    `model` is the per-request override extracted from `nim/<model>` specs.
+    Falls back to NIM_MODEL env when None.
     """
     import openai
 
     api_key = os.environ.get("NVIDIA_API_KEY", "").strip()
     if not api_key or api_key == "your_nvidia_api_key_here":
         raise RuntimeError("NVIDIA_API_KEY not set in env")
-    if provider_spec and provider_spec.startswith("nim/"):
-        model = provider_spec.split("/", 1)[1]
-    else:
-        model = os.environ.get("NIM_MODEL", "meta/llama-3.1-70b-instruct")
+    model = model or os.environ.get("NIM_MODEL", "meta/llama-3.1-70b-instruct")
     base_url = os.environ.get("NIM_BASE_URL", "https://integrate.api.nvidia.com/v1")
 
     logger.info("graph_dedup: calling NIM (model=%s, timeout=%.0fs)", model, timeout_s)
