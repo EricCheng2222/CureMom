@@ -27,7 +27,7 @@ from typing import Any
 
 import httpx
 
-from .graph_extractor import emit_heartbeat
+from .graph_extractor import emit_heartbeat, _suffix_for_model
 
 logger = logging.getLogger(__name__)
 
@@ -186,7 +186,7 @@ def _openai_dedup(user_msg: str, timeout_s: float, model: str | None = None) -> 
 def _nim_dedup(user_msg: str, model: str | None, timeout_s: float) -> str:
     """Call NIM (OpenAI-compatible) for dedup.
 
-    The NIM_MODEL default is `meta/llama-3.1-70b-instruct` — a non-reasoning
+    The NIM_MODEL default is `meta/llama-4-maverick-17b-128e-instruct` — a non-reasoning
     sibling on the same provider. Reasoning models like minimaxai/minimax-m2.7
     emit ~3 K thinking tokens before any JSON (100+ s wall clock) and NIM
     doesn't honor any of the standard "disable thinking" knobs. Users who
@@ -201,15 +201,17 @@ def _nim_dedup(user_msg: str, model: str | None, timeout_s: float) -> str:
     api_key = os.environ.get("NVIDIA_API_KEY", "").strip()
     if not api_key or api_key == "your_nvidia_api_key_here":
         raise RuntimeError("NVIDIA_API_KEY not set in env")
-    model = model or os.environ.get("NIM_MODEL", "meta/llama-3.1-70b-instruct")
+    model = model or os.environ.get("NIM_MODEL", "meta/llama-4-maverick-17b-128e-instruct")
     base_url = os.environ.get("NIM_BASE_URL", "https://integrate.api.nvidia.com/v1")
 
-    logger.info("graph_dedup: calling NIM (model=%s, timeout=%.0fs)", model, timeout_s)
+    system_prompt = _DEDUP_PROMPT + _suffix_for_model(model)
+    logger.info("graph_dedup: calling NIM (model=%s, timeout=%.0fs, no_think=%s)",
+                model, timeout_s, bool(_suffix_for_model(model)))
     client = openai.OpenAI(api_key=api_key, base_url=base_url, timeout=timeout_s)
     resp = client.chat.completions.create(
         model=model,
         messages=[
-            {"role": "system", "content": _DEDUP_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_msg},
         ],
         temperature=0.0,

@@ -385,14 +385,14 @@ class OpenAIProvider(LLMProvider):
 class NIMProvider(LLMProvider):
     """NVIDIA NIM (Inference Microservices) — OpenAI-compatible chat
     completions hosted at integrate.api.nvidia.com. Free tier covers
-    open-weight models including the default meta/llama-3.1-70b-instruct
+    open-weight models including the default meta/llama-4-maverick-17b-128e-instruct
     (non-reasoning, ~50 tok/s) and reasoning models like
     minimaxai/minimax-m2.7 (slow on structured-output tasks)."""
 
     def __init__(
         self,
         api_key: str | None = None,
-        model: str = "meta/llama-3.1-70b-instruct",
+        model: str = "meta/llama-4-maverick-17b-128e-instruct",
         max_tokens: int = 32768,
         base_url: str = "https://integrate.api.nvidia.com/v1",
         timeout_s: float = 120.0,
@@ -474,7 +474,7 @@ def get_provider(provider_spec: str | None = None) -> LLMProvider:
 
     if head == "nim":
         return NIMProvider(
-            model=model_override or os.environ.get("NIM_MODEL", "meta/llama-3.1-70b-instruct"),
+            model=model_override or os.environ.get("NIM_MODEL", "meta/llama-4-maverick-17b-128e-instruct"),
         )
 
     raise ValueError(

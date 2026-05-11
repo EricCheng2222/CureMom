@@ -243,7 +243,7 @@ def _resolve_provider(provider_spec: str | None) -> str:
 
     Accepts both bare provider names (`claude`, `openai`, `nim`) AND
     `<provider>/<model>` forms (`claude/claude-haiku-4-5-20251001`,
-    `openai/gpt-4o`, `nim/meta/llama-3.1-70b-instruct`). The model after
+    `openai/gpt-4o`, `nim/meta/llama-4-maverick-17b-128e-instruct`). The model after
     the slash is extracted by _llm_graph and threaded into the provider
     helper — _resolve_provider only decides routing.
 
@@ -265,6 +265,34 @@ def _model_override(provider_spec: str | None) -> str | None:
     if not provider_spec or "/" not in provider_spec:
         return None
     return provider_spec.split("/", 1)[1].strip() or None
+
+
+# Some NIM-hosted models (MiniMax M2.x) emit ~3 K reasoning tokens before
+# any answer, regardless of max_tokens, /no_think, chat_template_kwargs, or
+# reasoning_effort — NIM strips or ignores all of those on these models.
+# The one lever we DO have is the system prompt itself. Empirically a
+# strong "output mode: direct" instruction at the end of the system prompt
+# cuts reasoning by ~50 % on MiniMax. It's a no-op (empty string) on
+# non-reasoning models so we don't pollute the prompt for llama / mixtral.
+_NO_THINK_SUFFIX = (
+    "\n\n"
+    "OUTPUT MODE: Direct answer only. Do not reason. Do not think. "
+    "Do not show working or explanation. Emit ONLY the JSON object "
+    "specified above — start your response with `{` and stop after the "
+    "closing `}`. Any reasoning will be discarded."
+)
+
+
+def _suffix_for_model(model: str | None) -> str:
+    """Return the no-think suffix when the target model is a known
+    reasoning model; otherwise empty. Extend the substring list as new
+    reasoning models arrive on NIM (deepseek-r1, qwq, etc.)."""
+    if not model:
+        return ""
+    m = model.lower()
+    if "minimax" in m:
+        return _NO_THINK_SUFFIX
+    return ""
 
 
 def _llm_graph(
@@ -365,7 +393,7 @@ def _nim_graph(user_msg: str, model: str | None, timeout_s: float) -> dict[str, 
     reliably accept that flag — _parse_graph extracts the JSON object via
     regex.
 
-    `model` is the per-request override (e.g. `meta/llama-3.1-70b-instruct`
+    `model` is the per-request override (e.g. `meta/llama-4-maverick-17b-128e-instruct`
     pulled from the `nim/<model>` dropdown spec). Falls back to the env
     default when None.
     """
@@ -374,15 +402,17 @@ def _nim_graph(user_msg: str, model: str | None, timeout_s: float) -> dict[str, 
     api_key = os.environ.get("NVIDIA_API_KEY", "").strip()
     if not api_key or api_key == "your_nvidia_api_key_here":
         raise RuntimeError("NVIDIA_API_KEY not set in env")
-    model = model or os.environ.get("NIM_MODEL", "meta/llama-3.1-70b-instruct")
+    model = model or os.environ.get("NIM_MODEL", "meta/llama-4-maverick-17b-128e-instruct")
     base_url = os.environ.get("NIM_BASE_URL", "https://integrate.api.nvidia.com/v1")
 
-    logger.info("graph_extract: calling NIM (model=%s, timeout=%.0fs)", model, timeout_s)
+    system_prompt = _GRAPH_PROMPT + _suffix_for_model(model)
+    logger.info("graph_extract: calling NIM (model=%s, timeout=%.0fs, no_think=%s)",
+                model, timeout_s, bool(_suffix_for_model(model)))
     client = openai.OpenAI(api_key=api_key, base_url=base_url, timeout=timeout_s)
     resp = client.chat.completions.create(
         model=model,
         messages=[
-            {"role": "system", "content": _GRAPH_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_msg},
         ],
         temperature=0.0,

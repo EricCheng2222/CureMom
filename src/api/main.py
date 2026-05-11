@@ -1098,7 +1098,7 @@ async def llm_status() -> dict:
     out["providers"]["nim"] = {
         "available": bool(os.environ.get("NVIDIA_API_KEY", "").strip()
                           and os.environ.get("NVIDIA_API_KEY") != "your_nvidia_api_key_here"),
-        "model": os.environ.get("NIM_MODEL", "meta/llama-3.1-70b-instruct"),
+        "model": os.environ.get("NIM_MODEL", "meta/llama-4-maverick-17b-128e-instruct"),
         "endpoint": os.environ.get("NIM_BASE_URL", "https://integrate.api.nvidia.com/v1"),
     }
     return out

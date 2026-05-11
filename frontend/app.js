@@ -219,16 +219,20 @@ async function populateProviderDropdowns() {
       // like graph extraction + merge. MiniMax M2.7 is a reasoning model
       // that emits ~3 K thinking tokens before the answer (~100 s on a
       // 37-node merge); NIM doesn't honor enable_thinking=False on it.
-      const llamaOpt = document.createElement('option');
-      llamaOpt.value = 'nim/meta/llama-3.1-70b-instruct';
-      llamaOpt.textContent = 'NIM Llama 3.1 70B (fast, default)';
-      llamaOpt.dataset.isDefault = '1';
-      sel.appendChild(llamaOpt);
-
+      // MiniMax M2.7 (reasoning) is the default; our system prompt now
+      // appends a "do not reason" suffix that empirically cuts its
+      // thinking budget enough to be tolerable for graph_extract and
+      // dedup. Llama 3.1 70B stays as a non-reasoning escape hatch.
       const minimaxOpt = document.createElement('option');
       minimaxOpt.value = 'nim/minimaxai/minimax-m2.7';
-      minimaxOpt.textContent = 'NIM MiniMax M2.7 (reasoning — slow)';
+      minimaxOpt.textContent = 'NIM MiniMax M2.7 (reasoning, default)';
+      minimaxOpt.dataset.isDefault = '1';
       sel.appendChild(minimaxOpt);
+
+      const llamaOpt = document.createElement('option');
+      llamaOpt.value = 'nim/meta/llama-4-maverick-17b-128e-instruct';
+      llamaOpt.textContent = 'NIM Llama 4 Maverick (fast, non-reasoning)';
+      sel.appendChild(llamaOpt);
     }
 
     // Default to NIM (free tier) if available, else first non-extractive
