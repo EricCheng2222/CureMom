@@ -26,7 +26,7 @@ from elasticsearch import Elasticsearch
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from psycopg.rows import dict_row
 from pydantic import BaseModel, Field
 
@@ -525,7 +525,7 @@ def query_job(
     _key: Annotated[KeyRecord, Depends(require_api_key)] = None,
 ) -> dict[str, Any]:
     """Poll a QA job. Returns {status, stage?, model?, payload?, error?}."""
-    return _get_job_snapshot(job_id)
+    return _job_response(job_id)
 
 
 # Legacy SSE endpoint kept as a thin wrapper that runs the pipeline synchronously
@@ -651,6 +651,23 @@ def _get_job_snapshot(job_id: str) -> dict[str, Any]:
     return snapshot
 
 
+# Poll endpoints must NEVER be cached. Without Cache-Control, intermediaries
+# (serveo's HTTP/2 edge, Cloudflare, browser caches) are free to cache GET
+# responses indefinitely — and they will. The first poll returns "pending",
+# gets cached, every subsequent poll re-serves the cached "pending" even
+# after the server flipped to "done". This is the actual cause of the
+# "spinner disappears, no graph" bug users hit through the tunnel.
+_NO_CACHE_JOB_HEADERS = {
+    "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+    "Pragma": "no-cache",
+    "Expires": "0",
+}
+
+
+def _job_response(job_id: str) -> JSONResponse:
+    return JSONResponse(content=_get_job_snapshot(job_id), headers=_NO_CACHE_JOB_HEADERS)
+
+
 @app.post("/api/v1/graph_extract")
 def graph_extract(
     req: GraphExtractRequest,
@@ -670,7 +687,7 @@ def graph_extract_job(
     job_id: str,
     _key: Annotated[KeyRecord, Depends(require_api_key)] = None,
 ) -> dict[str, Any]:
-    return _get_job_snapshot(job_id)
+    return _job_response(job_id)
 
 
 @app.post("/api/v1/graph_dedup")
@@ -690,7 +707,7 @@ def graph_dedup_job(
     job_id: str,
     _key: Annotated[KeyRecord, Depends(require_api_key)] = None,
 ) -> dict[str, Any]:
-    return _get_job_snapshot(job_id)
+    return _job_response(job_id)
 
 
 # ─── Key management ───────────────────────────────────────────────────────────
