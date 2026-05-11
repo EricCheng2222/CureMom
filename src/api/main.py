@@ -643,16 +643,6 @@ def _start_job(
     return job_id
 
 
-def _get_job_snapshot(job_id: str) -> dict[str, Any]:
-    with _jobs_lock:
-        job = _jobs.get(job_id)
-        snapshot = dict(job) if job else None
-    if not snapshot:
-        raise HTTPException(status_code=404, detail="job not found or expired")
-    snapshot.pop("created", None)
-    return snapshot
-
-
 # Poll endpoints must NEVER be cached. Without Cache-Control, intermediaries
 # (serveo's HTTP/2 edge, Cloudflare, browser caches) are free to cache GET
 # responses indefinitely — and they will. The first poll returns "pending",
@@ -667,7 +657,35 @@ _NO_CACHE_JOB_HEADERS = {
 
 
 def _job_response(job_id: str) -> JSONResponse:
-    return JSONResponse(content=_get_job_snapshot(job_id), headers=_NO_CACHE_JOB_HEADERS)
+    """Return the current job state with anti-cache headers.
+
+    Both the 200 (pending/done/error) and the 404 (unknown id) paths carry
+    the same headers — the 404 is defensive: if a proxy cached it, a
+    fresh job with the same id (vanishingly rare with uuid4 but possible)
+    would inherit the stale 404.
+    """
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        snapshot = dict(job) if job else None
+    if not snapshot:
+        return JSONResponse(
+            status_code=404,
+            content={"detail": "job not found or expired"},
+            headers=_NO_CACHE_JOB_HEADERS,
+        )
+    snapshot.pop("created", None)
+    return JSONResponse(content=snapshot, headers=_NO_CACHE_JOB_HEADERS)
+
+
+# Kept for the regression tests that call this helper directly.
+def _get_job_snapshot(job_id: str) -> dict[str, Any]:
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        snapshot = dict(job) if job else None
+    if not snapshot:
+        raise HTTPException(status_code=404, detail="job not found or expired")
+    snapshot.pop("created", None)
+    return snapshot
 
 
 @app.post("/api/v1/graph_extract")
