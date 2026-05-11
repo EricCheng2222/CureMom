@@ -449,20 +449,29 @@ function _refreshGraphChrome(overrideStatus) {
 }
 
 async function _onMergeClick() {
+  // Every branch surfaces a chrome message — earlier versions swallowed
+  // skips and failures into console.error only, which looked like "the
+  // button doesn't work" from the user's side.
   if (!_graphInitialized) {
     console.log('[KGraph] merge skipped — graph not initialized');
+    _refreshGraphChrome('Merge skipped — open the graph panel first');
+    setTimeout(() => _refreshGraphChrome(), 4000);
     return;
   }
   const { nodes } = KGraph.size();
   if (nodes < 2) {
     console.log('[KGraph] merge skipped — need at least 2 nodes');
+    _refreshGraphChrome('Merge skipped — need at least 2 nodes');
+    setTimeout(() => _refreshGraphChrome(), 4000);
     return;
   }
   const labels = KGraph.exportJSON().nodes.map(n => n.label);
   const provider = document.getElementById('consumer-provider')?.value || null;
   const btn = document.getElementById('graph-merge-btn');
   if (btn) { btn.disabled = true; btn.textContent = 'Merging…'; }
+  _refreshGraphChrome(`Merging ${labels.length} labels via ${provider || 'default'}…`);
   console.log('[KGraph] POST /api/v1/graph_dedup with', labels.length, 'labels, provider:', provider);
+  console.log('[KGraph] submitted labels:', labels);
   try {
     const payload = await _runGraphJob({
       startUrl: `${API}/api/v1/graph_dedup`,
@@ -470,7 +479,11 @@ async function _onMergeClick() {
       startBody: { labels, llm_provider: provider },
       pollMs: 750,  // tighter cadence — dedup output is short, don't waste a 1.5 s tail
     });
-    if (!payload) return;
+    if (!payload) {
+      _refreshGraphChrome('Merge returned no payload');
+      setTimeout(() => _refreshGraphChrome(), 6000);
+      return;
+    }
     const groups = payload.groups || [];
     console.log('[KGraph] received', groups.length, 'merge groups:', groups);
     const before = KGraph.size().nodes;
@@ -478,12 +491,13 @@ async function _onMergeClick() {
     const after = KGraph.size().nodes;
     const status = result.groupsApplied > 0
       ? `Merged ${result.groupsApplied} group${result.groupsApplied !== 1 ? 's' : ''} (${before} → ${after} nodes)`
-      : 'No duplicates found';
+      : `No duplicates found by ${provider || 'default'} (LLM saw ${labels.length} labels)`;
     _refreshGraphChrome(status);
-    // Revert to default chrome after a few seconds.
-    setTimeout(() => _refreshGraphChrome(), 4000);
+    setTimeout(() => _refreshGraphChrome(), 6000);
   } catch (err) {
     console.error('[KGraph] dedup failed:', err);
+    _refreshGraphChrome(`Merge failed: ${(err && err.message) || err}`);
+    setTimeout(() => _refreshGraphChrome(), 8000);
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = 'Merge'; }
   }
