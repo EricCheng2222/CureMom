@@ -25,6 +25,8 @@ from __future__ import annotations
 import logging
 import os
 import secrets
+import threading
+import time
 from dataclasses import dataclass
 from typing import Annotated
 
@@ -162,19 +164,69 @@ def _open_conn() -> psycopg.Connection:
     return psycopg.connect(dsn, row_factory=dict_row)
 
 
+# In-process LRU-with-TTL cache for the key→KeyRecord lookup. Without this
+# every request (including every poll on /job/{id}) opens a fresh psycopg
+# connection — at 1.5 s polling intervals a single 30 s job churns 20 DB
+# connections just to validate the same header. 60 s TTL is short enough
+# that key revocations propagate within a minute. Negative results are NOT
+# cached (a freshly minted key shouldn't be blocked for up to a minute by
+# a prior 401 lookup).
+_KEY_CACHE: dict[str, tuple[float, KeyRecord]] = {}
+_KEY_CACHE_LOCK = threading.Lock()
+_KEY_CACHE_TTL_S = 60.0
+_KEY_CACHE_MAX = 1024  # bound memory; trim oldest on overflow
+
+
+def _cached_lookup(raw_key: str) -> KeyRecord | None:
+    now = time.monotonic()
+    with _KEY_CACHE_LOCK:
+        entry = _KEY_CACHE.get(raw_key)
+        if entry and entry[0] > now:
+            return entry[1]
+        # Stale entries are dropped lazily on next hit; here we just fall through.
+
+    # Cache miss — hit the DB.
+    with _open_conn() as conn:
+        rec = lookup_key(conn, raw_key)
+
+    if rec is not None:
+        with _KEY_CACHE_LOCK:
+            if len(_KEY_CACHE) >= _KEY_CACHE_MAX:
+                # Drop the oldest expiring entry — bounded eviction, no LRU.
+                oldest = min(_KEY_CACHE.items(), key=lambda kv: kv[1][0])[0]
+                _KEY_CACHE.pop(oldest, None)
+            _KEY_CACHE[raw_key] = (now + _KEY_CACHE_TTL_S, rec)
+    else:
+        # Drop any stale positive entry — the key was just revoked or rotated.
+        with _KEY_CACHE_LOCK:
+            _KEY_CACHE.pop(raw_key, None)
+    return rec
+
+
+def invalidate_key_cache(raw_key: str | None = None) -> None:
+    """Drop a single key (or the whole cache) — call this from any code path
+    that revokes a key so the next request re-reads the DB instead of using
+    a still-valid cache entry."""
+    with _KEY_CACHE_LOCK:
+        if raw_key is None:
+            _KEY_CACHE.clear()
+        else:
+            _KEY_CACHE.pop(raw_key, None)
+
+
 def require_api_key(
     x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
 ) -> KeyRecord:
     """FastAPI dependency: extract X-API-Key header, validate against DB.
-    Returns the KeyRecord on success, raises 401 otherwise.
+    Returns the KeyRecord on success, raises 401 otherwise. Validations are
+    cached in-process for 60 s; revocations propagate within that window.
     """
     if not x_api_key:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing X-API-Key header. Get a key from the admin.",
         )
-    with _open_conn() as conn:
-        rec = lookup_key(conn, x_api_key.strip())
+    rec = _cached_lookup(x_api_key.strip())
     if rec is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

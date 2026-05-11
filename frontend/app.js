@@ -506,8 +506,15 @@ function _cleanForGraph(text) {
   return t;
 }
 
+// Monotonic token incremented on every _extractGraph call. A second Q&A
+// fired before the previous graph extraction returns causes the previous
+// call's awaited result to be discarded — otherwise the older Q1 result
+// can land AFTER Q2's, re-shuffle the canvas, and flicker the spinner.
+let _graphExtractToken = 0;
+
 async function _extractGraph(query, response, citations) {
-  console.log('[KGraph] _extractGraph called — query:', query.slice(0, 60), '| panel open:', _isGraphPanelOpen());
+  const token = ++_graphExtractToken;
+  console.log('[KGraph] _extractGraph called — query:', query.slice(0, 60), '| panel open:', _isGraphPanelOpen(), '| token:', token);
   // Always run — even if the panel is closed, the data accumulates so opening
   // the panel later shows what was collected. Spinner is panel-only.
   ensureGraphInit();
@@ -544,7 +551,13 @@ async function _extractGraph(query, response, citations) {
       });
     } catch (err) {
       lastErr = err;
-      console.error('[KGraph] graph_extract job failed:', err?.message);
+      console.error('[KGraph] graph_extract job failed (token', token, '):', err?.message);
+    }
+    // Stale result: another _extractGraph started while we were polling.
+    // Discard ours — the newer one owns the spinner + canvas now.
+    if (token !== _graphExtractToken) {
+      console.log('[KGraph] discarding stale graph_extract result — token', token, '!=', _graphExtractToken);
+      return;
     }
     if (!payload) {
       console.error('[KGraph] /graph_extract fetch failed after retries:', lastErr);
@@ -564,12 +577,16 @@ async function _extractGraph(query, response, citations) {
     }
     const result = KGraph.merge(payload);
     console.log('[KGraph] merged —', result.addedNodes.length, 'new nodes,', result.addedEdges.length, 'new edges');
-    // Truncated payload: graph built from a partial LLM response. Surface
-    // a brief warning in the graph chrome so the user knows the panel may
-    // be missing relations from the tail of the answer.
-    if (payload.error && payload.error.startsWith('truncated')) {
-      _refreshGraphChrome('Graph partial — answer was truncated (raise max_tokens or shorten the question)');
-      setTimeout(() => _refreshGraphChrome(), 8000);
+    // Partial payload: graph built from a truncated LLM input or output.
+    // Surface the specific reason in the graph chrome (input vs output is
+    // actionable — input truncation means shorten the question; output
+    // truncation means raise max_tokens).
+    if (payload.error && /^truncated/i.test(payload.error)) {
+      const reason = payload.error.split(';')[0].trim();
+      _refreshGraphChrome(`Graph partial — ${reason}`);
+      setTimeout(() => {
+        if (token === _graphExtractToken) _refreshGraphChrome();
+      }, 8000);
     } else {
       _refreshGraphChrome();
     }
@@ -580,7 +597,9 @@ async function _extractGraph(query, response, citations) {
       toggleGraphPanel();
     }
   } finally {
-    _showGraphSpinner(false);
+    // Only the most-recent call owns the spinner — a stale one finishing
+    // late must not turn off the spinner the newer call just turned on.
+    if (token === _graphExtractToken) _showGraphSpinner(false);
   }
 }
 
@@ -758,6 +777,7 @@ async function sendConsumerMessage() {
     const start = await apiFetch(`${API}/api/v1/query/async`, {
       method: 'POST',
       body: reqBody,
+      signal: AbortSignal.timeout(15000),
     });
     if (!start.ok) {
       removeTypingBubble(typing);
@@ -768,20 +788,28 @@ async function sendConsumerMessage() {
     }
     const { job_id } = await start.json();
 
-    // Poll the job, updating the typing-bubble stage on each tick.
+    // Poll the job, updating the typing-bubble stage on each tick. First
+    // poll fires almost immediately so quick answers (cached embedder +
+    // small corpus) don't sit on the 1500 ms idle that follows. Each poll
+    // fetch has its own 8 s timeout so a dropped tunnel can't stall the
+    // overall deadline check.
     const maxWaitMs = 600000;  // 10 min — matches graph deadline + LLM timeout
     const pollMs = 1500;
     const deadline = Date.now() + maxWaitMs;
+    let firstPoll = true;
     let lastStage = null;
     let finalPayload = null;
     let finalErr = null;
     while (Date.now() < deadline) {
-      await new Promise(res => setTimeout(res, pollMs));
+      await new Promise(res => setTimeout(res, firstPoll ? 150 : pollMs));
+      firstPoll = false;
       let pr;
       try {
-        pr = await apiFetch(`${API}/api/v1/query/job/${encodeURIComponent(job_id)}`);
+        pr = await apiFetch(`${API}/api/v1/query/job/${encodeURIComponent(job_id)}`, {
+          signal: AbortSignal.timeout(8000),
+        });
       } catch {
-        // Transient network blip — keep polling.
+        // Transient network blip or per-fetch timeout — keep polling.
         continue;
       }
       if (!pr.ok) {
@@ -1205,6 +1233,7 @@ async function _runGraphJob({ startUrl, jobUrlPrefix, startBody, maxWaitMs = 600
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(startBody),
+    signal: AbortSignal.timeout(15000),
   });
   if (!r.ok) {
     const err = await r.json().catch(() => ({}));
@@ -1213,14 +1242,24 @@ async function _runGraphJob({ startUrl, jobUrlPrefix, startBody, maxWaitMs = 600
   const { job_id } = await r.json();
   if (!job_id) throw new Error('start response missing job_id');
 
+  // Poll the first time almost immediately — a fast LLM call (Haiku or NIM
+  // on a small graph) routinely finishes in <500 ms, so a 1500 ms sleep
+  // before the first poll wastes that much wall clock on the user. After
+  // the first miss, fall back to the configured pollMs cadence.
+  // Per-fetch AbortSignal.timeout(8000) guards against a hung tunnel: a
+  // single dropped response can no longer stall the overall deadline.
   const deadline = Date.now() + maxWaitMs;
+  let firstPoll = true;
   while (Date.now() < deadline) {
-    await new Promise(res => setTimeout(res, pollMs));
+    await new Promise(res => setTimeout(res, firstPoll ? 150 : pollMs));
+    firstPoll = false;
     let pr;
     try {
-      pr = await apiFetch(`${jobUrlPrefix}/${encodeURIComponent(job_id)}`);
+      pr = await apiFetch(`${jobUrlPrefix}/${encodeURIComponent(job_id)}`, {
+        signal: AbortSignal.timeout(8000),
+      });
     } catch (e) {
-      // Transient network blip — keep polling.
+      // Transient network blip or per-fetch timeout — keep polling.
       continue;
     }
     if (!pr.ok) {

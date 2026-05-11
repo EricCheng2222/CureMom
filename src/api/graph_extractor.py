@@ -187,10 +187,13 @@ Output:
 }"""
 
 
+_ANSWER_CHAR_CAP = 5000
+
+
 def _build_user_message(query: str, answer: str) -> str:
     return (
         f"Question: {query}\n\n"
-        f"Answer (with [N] citation markers): {answer[:5000]}"
+        f"Answer (with [N] citation markers): {answer[:_ANSWER_CHAR_CAP]}"
     )
 
 
@@ -624,6 +627,16 @@ def extract_graph(
     if not query or not answer:
         return GraphPayload(nodes=[], edges=[])
 
+    # If the answer exceeds the input cap, only the head is sent to the LLM —
+    # any relations stated in the tail will be missing. Surface that so the
+    # frontend can warn instead of silently showing an incomplete graph.
+    input_truncated = len(answer) > _ANSWER_CHAR_CAP
+    if input_truncated:
+        logger.warning(
+            "graph_extract: answer length %d > cap %d — graph built from first %d chars only",
+            len(answer), _ANSWER_CHAR_CAP, _ANSWER_CHAR_CAP,
+        )
+
     # Map [N] citation index → chunk_id. The frontend sends `chunks` in the
     # same order as the citation pills, so chunks[i] corresponds to [i+1].
     citation_index_to_chunk_id: dict[int, int] = {
@@ -643,8 +656,8 @@ def extract_graph(
     raw_relations = graph_obj.get("relations", [])
     raw_types = graph_obj.get("types", {}) or {}
     raw_dump = graph_obj.get("_raw", "") or ""
-    truncated = bool(graph_obj.get("_truncated"))
-    if truncated:
+    output_truncated = bool(graph_obj.get("_truncated"))
+    if output_truncated:
         logger.warning(
             "graph_extract: LLM output truncated — salvaged %d relations from partial JSON",
             len(raw_relations),
@@ -692,6 +705,16 @@ def extract_graph(
     logger.info("graph_extract: %s", stage_counts)
 
     diag: str | None = None
+    truncation_notes: list[str] = []
+    if input_truncated:
+        truncation_notes.append(
+            f"truncated input: only first {_ANSWER_CHAR_CAP} of {len(answer)} answer chars sent to LLM"
+        )
+    if output_truncated:
+        truncation_notes.append(
+            f"truncated output: LLM hit max_tokens; salvaged {len(raw_relations)} relations"
+        )
+
     if not kept_nodes and not edges:
         if not raw_relations:
             cause = "LLM returned no relations"
@@ -708,13 +731,9 @@ def extract_graph(
             f"{cause}. Stages: {stage_counts}. "
             f"Raw LLM head: {raw_dump[:300]}"
         )
-    elif truncated:
-        # Partial graph — answer was longer than the LLM cap. Surface the
-        # truncation so the frontend can show a warning instead of pretending
-        # this is a complete graph.
-        diag = (
-            f"truncated: LLM output exceeded max_tokens; built graph from "
-            f"{len(raw_relations)} salvaged relations (graph may be incomplete)"
-        )
+    elif truncation_notes:
+        # Partial graph — surface the kind(s) of truncation so the frontend
+        # can show "graph may be incomplete" instead of pretending it's done.
+        diag = "; ".join(truncation_notes) + " (graph may be incomplete)"
 
     return GraphPayload(nodes=kept_nodes, edges=edges, error=diag)

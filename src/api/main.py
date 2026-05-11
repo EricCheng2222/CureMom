@@ -63,6 +63,8 @@ _retriever: HybridRetriever | None = None
 _mesh_expander: MeSHExpander | None = None
 _embedder: Any = None      # PubMedBERT — loaded lazily on first hybrid query
 _hipporag: Any = None      # HippoRAG retriever — loaded lazily on first request that needs it
+_hipporag_lock = threading.Lock()   # gate concurrent first-loads; both readers see the same instance
+_embedder_lock = threading.Lock()   # same for PubMedBERT
 
 
 @asynccontextmanager
@@ -421,24 +423,49 @@ def _run_query_pipeline(
         update(stage="embedding")
         global _embedder
         if _embedder is None:
-            from ..embeddings.chunk_pipeline import _Embedder
-            logger.info("Loading PubMedBERT for hybrid retrieval (one-time)…")
-            _embedder = _Embedder()
+            # Double-checked init under a lock so two concurrent first-callers
+            # don't both load PubMedBERT (slow + RAM-heavy).
+            with _embedder_lock:
+                if _embedder is None:
+                    from ..embeddings.chunk_pipeline import _Embedder
+                    logger.info("Loading PubMedBERT for hybrid retrieval (one-time)…")
+                    _embedder = _Embedder()
         query_embedding = _embedder.encode([effective_query])[0]
 
     if use_hipporag:
         global _hipporag
         if _hipporag is None:
-            update(stage="loading_graph")
-            from ..search.hipporag import HippoRAGRetriever
-            logger.info("Loading HippoRAG entity graph (one-time)…")
-            _hipporag = HippoRAGRetriever(DB_DSN)
-            _hipporag._ensure_loaded()
-            if _hipporag._graph is None or _hipporag._graph.number_of_edges() == 0:
-                raise RuntimeError(
-                    "entity_graph table is empty — run scripts/build_entity_graph.py"
-                )
+            with _hipporag_lock:
+                if _hipporag is None:
+                    update(stage="loading_graph")
+                    from ..search.hipporag import HippoRAGRetriever
+                    logger.info("Loading HippoRAG entity graph (one-time)…")
+                    h = HippoRAGRetriever(DB_DSN)
+                    h._ensure_loaded()
+                    if h._graph is None or h._graph.number_of_edges() == 0:
+                        raise RuntimeError(
+                            "entity_graph table is empty — run scripts/build_entity_graph.py"
+                        )
+                    _hipporag = h
         retriever._hipporag = _hipporag
+
+    # Fire drug lookup concurrently with retrieval — both depend only on
+    # effective_query, neither blocks the other. Saves up to ~1-3 s on
+    # drug-mentioning queries (FDA/PubChem/Wikipedia round-trip).
+    drug_result: dict[str, list[str]] = {"cards": [], "names": []}
+
+    def _do_drug_lookup() -> None:
+        try:
+            with psycopg.connect(DB_DSN) as drug_conn:
+                cards = lookup_drugs_for_query(drug_conn, effective_query, max_drugs=3)
+                for c in cards:
+                    drug_result["cards"].append(c.to_text())
+                    drug_result["names"].append(f"{c.name} ({c.source})")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Drug lookup failed (%s); continuing.", exc)
+
+    drug_thread = threading.Thread(target=_do_drug_lookup, daemon=True)
+    drug_thread.start()
 
     update(stage="retrieving")
     chunks = retriever.retrieve(
@@ -451,6 +478,8 @@ def _run_query_pipeline(
     )
 
     if not chunks:
+        # Cancel the drug-lookup wait — answer won't use it. Thread is daemon
+        # so it dies with the process if it lingers.
         return {
             "query": req.query,
             "response": "No relevant papers were found for this query.",
@@ -458,17 +487,13 @@ def _run_query_pipeline(
             "metadata": {"retrieval_strategy": strategy, "model_used": "none"},
         }
 
-    update(stage="drug_lookup")
-    drug_cards: list[str] = []
-    drug_card_names: list[str] = []
-    try:
-        with psycopg.connect(DB_DSN) as drug_conn:
-            cards = lookup_drugs_for_query(drug_conn, effective_query, max_drugs=3)
-            for c in cards:
-                drug_cards.append(c.to_text())
-                drug_card_names.append(f"{c.name} ({c.source})")
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Drug lookup failed (%s); continuing.", exc)
+    # Only surface the drug_lookup stage if retrieval beat the lookup and
+    # we're actually waiting on it; otherwise skip straight to synthesizing.
+    if drug_thread.is_alive():
+        update(stage="drug_lookup")
+    drug_thread.join(timeout=10.0)
+    drug_cards = drug_result["cards"]
+    drug_card_names = drug_result["names"]
 
     provider = get_provider(req.options.llm_provider)
     update(stage="synthesizing", model=provider.name)
@@ -512,10 +537,20 @@ def query_async(
     The poll response also includes the current `stage` (analyzing /
     embedding / retrieving / synthesizing / verifying) for live progress.
     """
+    if not _acquire_key_slot(_key.id):
+        raise HTTPException(
+            status_code=429,
+            detail=f"too many concurrent jobs (max {_KEY_JOB_LIMIT}) — "
+                   "wait for an in-flight one to finish",
+        )
+
     def work(update: Callable[..., None]) -> dict[str, Any]:
         return _run_query_pipeline(req, retriever, update)
 
-    job_id = _start_job(work, initial={"stage": "analyzing"}, pass_update=True)
+    job_id = _start_job(
+        work, initial={"stage": "analyzing"}, pass_update=True,
+        on_complete=lambda kid=_key.id: _release_key_slot(kid),
+    )
     return {"job_id": job_id}
 
 
@@ -547,18 +582,10 @@ def query_stream(
         return f"data: {json.dumps({'stage': stage, **extra})}\n\n"
 
     def gen():
+        # Stage granularity is lost on this legacy path — the SSE generator
+        # can't be fed from a callback running on another thread without a
+        # queue. Clients wanting per-stage progress should use /query/async.
         try:
-            # Adapter: forward each pipeline stage as an SSE event.
-            def update(**kwargs: Any) -> None:
-                stage = kwargs.pop("stage", None)
-                if stage:
-                    # Note: yield from here doesn't work since update is a plain fn.
-                    # We use a queue-style hack via the pipeline's own yield path
-                    # below to keep this endpoint working.
-                    raise NotImplementedError
-            # Simpler approach: just call the pipeline and emit a single complete event.
-            # Stage granularity is lost on this legacy path; clients wanting it
-            # should use /query/async.
             yield evt("analyzing")
             output = _run_query_pipeline(req, retriever, lambda **_: None)
             yield evt("complete", result=output)
@@ -594,15 +621,39 @@ _jobs_lock = threading.Lock()
 _JOB_TTL_S = 1200  # 20 min — bigger than the LLM + polling deadlines (both
                    # 600 s) so a result that completes near the polling
                    # deadline doesn't get GC'd before the last poll picks it up.
+_JOBS_MAX = 4096   # hard cap on in-memory jobs; evict oldest on overflow so a
+                   # runaway client can't OOM the server before TTL expiry.
+
+# Per-key concurrent-job semaphores. Each API key gets up to _KEY_JOB_LIMIT
+# in-flight jobs; trying to start a fourth returns HTTP 429 instead of
+# spawning a daemon thread (every job costs an LLM round-trip + a Python
+# thread stack). Semaphores live for the process lifetime — a key that never
+# uses its slots just has an idle semaphore.
+_KEY_JOB_LIMIT = 3
+_KEY_SEMAPHORES: dict[int, threading.Semaphore] = {}
+_KEY_SEMAPHORES_LOCK = threading.Lock()
 
 
-def _gc_jobs() -> None:
-    now = time.monotonic()
-    with _jobs_lock:
-        expired = [jid for jid, j in _jobs.items()
-                   if now - j.get("created", 0) > _JOB_TTL_S]
-        for jid in expired:
-            del _jobs[jid]
+def _acquire_key_slot(key_id: int) -> bool:
+    """Try to grab one of this key's _KEY_JOB_LIMIT slots. Non-blocking.
+    Returns False when all slots are in use — caller should 429."""
+    with _KEY_SEMAPHORES_LOCK:
+        sem = _KEY_SEMAPHORES.get(key_id)
+        if sem is None:
+            sem = threading.Semaphore(_KEY_JOB_LIMIT)
+            _KEY_SEMAPHORES[key_id] = sem
+    return sem.acquire(blocking=False)
+
+
+def _release_key_slot(key_id: int) -> None:
+    sem = _KEY_SEMAPHORES.get(key_id)
+    if sem is not None:
+        try:
+            sem.release()
+        except ValueError:
+            # Over-release (would put count > initial). Shouldn't happen with
+            # the acquire/release pairing below, but defensive.
+            logger.warning("key %d job slot over-released", key_id)
 
 
 def _start_job(
@@ -610,19 +661,34 @@ def _start_job(
     *,
     initial: dict[str, Any] | None = None,
     pass_update: bool = False,
+    on_complete: Callable[[], None] | None = None,
 ) -> str:
     """Run `work` on a daemon thread; return a job_id.
 
     work() returns the payload dict on success or raises on error.
     If pass_update=True, work is called as work(update_fn) where update_fn
     takes kwargs to merge into the live job state (for stage progress).
+    `on_complete` runs in the worker thread's finally clause regardless of
+    success/failure — used by callers to release per-key semaphores.
     """
-    _gc_jobs()
     job_id = uuid.uuid4().hex[:16]
+    now = time.monotonic()
+    # Atomic gc + insert: hold the lock across both so a freshly-allocated
+    # job_id can never collide with a parallel GC scan. Also enforces the
+    # _JOBS_MAX cap by evicting the oldest entry on overflow.
     with _jobs_lock:
+        if _jobs:
+            expired = [jid for jid, j in _jobs.items()
+                       if now - j.get("created", 0) > _JOB_TTL_S]
+            for jid in expired:
+                _jobs.pop(jid, None)
+        if len(_jobs) >= _JOBS_MAX:
+            # Drop the oldest entry (smallest `created`) to make room.
+            oldest = min(_jobs.items(), key=lambda kv: kv[1].get("created", 0))[0]
+            _jobs.pop(oldest, None)
         _jobs[job_id] = {
             "status": "pending",
-            "created": time.monotonic(),
+            "created": now,
             **(initial or {}),
         }
 
@@ -638,6 +704,12 @@ def _start_job(
         except Exception as exc:  # noqa: BLE001
             logger.exception("job %s failed", job_id)
             _update(status="error", error=f"{type(exc).__name__}: {exc}")
+        finally:
+            if on_complete is not None:
+                try:
+                    on_complete()
+                except Exception:  # noqa: BLE001
+                    logger.exception("job %s on_complete failed", job_id)
 
     threading.Thread(target=_runner, daemon=True).start()
     return job_id
@@ -694,12 +766,23 @@ def graph_extract(
     _key: Annotated[KeyRecord, Depends(require_api_key)] = None,
 ) -> dict[str, str]:
     """Start a background graph-extract job. Poll /graph_extract/job/{id}."""
+    if not _acquire_key_slot(_key.id):
+        raise HTTPException(
+            status_code=429,
+            detail=f"too many concurrent jobs (max {_KEY_JOB_LIMIT}) — "
+                   "wait for an in-flight one to finish",
+        )
+
     def work() -> dict[str, Any]:
         chunk_dicts = [{"id": c.id, "text": c.text} for c in req.chunks]
         payload = extract_graph(req.query, req.answer, chunk_dicts,
                                 provider_spec=req.llm_provider)
         return payload.to_dict()
-    return {"job_id": _start_job(work)}
+    return {
+        "job_id": _start_job(
+            work, on_complete=lambda kid=_key.id: _release_key_slot(kid),
+        )
+    }
 
 
 @app.get("/api/v1/graph_extract/job/{job_id}")
@@ -716,10 +799,21 @@ def graph_dedup(
     _key: Annotated[KeyRecord, Depends(require_api_key)] = None,
 ) -> dict[str, str]:
     """Start a background graph-dedup job. Poll /graph_dedup/job/{id}."""
+    if not _acquire_key_slot(_key.id):
+        raise HTTPException(
+            status_code=429,
+            detail=f"too many concurrent jobs (max {_KEY_JOB_LIMIT}) — "
+                   "wait for an in-flight one to finish",
+        )
+
     def work() -> dict[str, Any]:
         groups = dedup_entities(req.labels, provider_spec=req.llm_provider)
         return {"groups": [g.to_dict() for g in groups]}
-    return {"job_id": _start_job(work)}
+    return {
+        "job_id": _start_job(
+            work, on_complete=lambda kid=_key.id: _release_key_slot(kid),
+        )
+    }
 
 
 @app.get("/api/v1/graph_dedup/job/{job_id}")

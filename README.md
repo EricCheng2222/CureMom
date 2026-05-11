@@ -37,7 +37,13 @@ PubMed API                   ChEMBL API (no key required)
         ↓
   Swappable LLM Layer (extractive / Anthropic Claude / OpenAI / NVIDIA NIM)
         ↓
-  FastAPI → structured JSON response + passage-level citations
+  FastAPI ─ async-job + polling endpoints (compute-bound)
+        │       POST /query/async → {job_id}
+        │       GET  /query/job/{id} → {status, stage, payload?}   ← Cache-Control: no-store
+        ↓
+   serveo / Cloudflare Tunnel ─ HTTPS edge with ~10 s response cap
+        ↓
+   Browser ─ Cytoscape.js knowledge-graph panel, polls every 150 ms → 1.5 s
 ```
 
 **Phases (current state):**
@@ -45,14 +51,49 @@ PubMed API                   ChEMBL API (no key required)
 - **Phase 2** ✅ live — section-aware chunking + PubMedBERT (768-dim) embeddings on **all 866K chunks** (abstract + intro/methods/results/discussion from 34,596 OA full-text papers), HuggingFace transformer NER (`d4data/biomedical-ner-all`) over **1.23M entities**, HNSW vector index built
 - **Phase 3** ✅ live — pluggable LLM (Anthropic Claude / OpenAI / NVIDIA NIM / extractive) with per-request model selection in the UI; the dropdown auto-populates from `/llm/status` based on which API keys are configured. Patient-mode prompt with clickable follow-up suggestions, query-complexity classifier, citation verifier (catches hallucinated `[N]` indices and weakly-supported claims).
 - **Phase 4** ✅ live — HippoRAG Personalized PageRank over a **5.27M-edge entity graph** (built from MeSH descriptors merged with NER co-occurrences), SPLADE sparse-vector pipeline ready to encode
-- **Drug reference layer** ✅ live — **1,719 FDA drug labels** (openFDA) + Wikipedia fallback for older/discontinued drugs. An LLM query analyzer routes each request: drug-name questions trigger a forward FDA lookup; effect/condition questions ("drugs for muscle relaxation") trigger reverse FTS with LLM-expanded clinical synonyms.
+- **Async-job runtime** ✅ live — every compute-bound endpoint (`/query`, `/graph_extract`, `/graph_dedup`) is fronted by a POST that returns a `job_id` and a GET that polls the in-memory job store. Each HTTP exchange stays well under any tunnel's wall-clock cap; the LLM call runs on a daemon thread for as long as it needs. Poll responses carry `Cache-Control: no-store` so proxies can't shadow a "pending" forever. See **Runtime Architecture** below.
+- **Drug reference layer** ✅ live — **1,719 FDA drug labels** (openFDA) + Wikipedia fallback for older/discontinued drugs. An LLM query analyzer routes each request: drug-name questions trigger a forward FDA lookup; effect/condition questions ("drugs for muscle relaxation") trigger reverse FTS with LLM-expanded clinical synonyms. Drug lookup runs **concurrently** with retrieval (both depend only on the effective query) so the slower of the two — not their sum — gates the LLM call.
 - **Multi-turn conversation** ✅ live — patient chat sends a rolling history (last 6 turns) with each request. Past Q+A appear bare (no [N] markers, no boilerplate, no drug cards re-injected); only the current turn carries full retrieval context. Pronouns ("its side effects") resolve via the analyzer + retrieval-side query fusion.
-- **Live knowledge-graph panel** ✅ live — split-page chat with a Cytoscape.js canvas on the right that grows turn-by-turn. The LLM emits directed relations from the question + answer plus a `types` map classifying each concept into Drug / Disease / Gene / Anatomy / Symptom / Other; each unique subject/object becomes a node, colored by type to match the legend. Grounding: labels must appear as a substring of the answer text (answer is the authoritative source). Vague predicates ("is managed by", "involves") and generic single-word labels ("protein", "RNA") are dropped server-side. Web-like fcose layout, pan/zoom/fit controls, **node-search** input, click popover with citation pills + "Ask about this" + "Remove", **Merge** button calls the LLM to dedup equivalent entities ("B-cell" ≡ "B cell" ≡ "B cells"). The QA dropdown choice drives graph extraction + dedup: pick `claude` and the whole pipeline goes through Anthropic; pick `nim` and it goes through NVIDIA NIM (free tier MiniMax-M2.7).
+- **Live knowledge-graph panel** ✅ live — split-page chat with a Cytoscape.js canvas on the right that grows turn-by-turn. The LLM emits directed relations from the question + answer plus a `types` map classifying each concept into Drug / Disease / Gene / Anatomy / Symptom / Other; each unique subject/object becomes a node, colored by type to match the legend. Grounding: labels must appear as a substring of the answer text (answer is the authoritative source). Vague predicates ("is managed by", "involves") and generic single-word labels ("protein", "RNA") are dropped server-side. Web-like fcose layout (debounced), pan/zoom/fit controls, **node-search** input, click popover with citation pills + "Ask about this" + "Remove", **Merge** button calls the LLM to dedup equivalent entities ("B-cell" ≡ "B cell" ≡ "B cells"). The QA dropdown choice drives graph extraction + dedup: pick `claude` and the whole pipeline goes through Anthropic; pick `nim` and it goes through NVIDIA NIM (free tier MiniMax-M2.7). Partial-output recovery: when the LLM hits `max_tokens` mid-JSON the parser salvages every complete relation; the panel flags "Graph partial — truncated …" so the user knows to shorten the question or raise the cap. An inflight token discards the older result when the user fires a new question before the previous graph finishes — only the latest answer's graph is applied.
 - **Ichthyosis corpus** ✅ ingested — 15,613 papers across 7 ichthyosis-related MeSH topics (core, lamellar, X-linked, harlequin/EHK, genetics, treatment, skin barrier biology). Embedding/NER/full-text pipelines running.
+- **Creatine corpus** 🟡 partial — 10,432 PubMed records ingested + abstracts embedded; full-text JATS XML fetched for 3,186 OA papers (2026-05-10). Section-aware chunking + embedding of the full text **not yet run** — those papers currently surface in retrieval at abstract level only.
 
 **Default retrieval strategy:** `full` = BM25 + dense + HippoRAG PPR rerank.
 
 **Default LLM provider:** `nim/minimaxai/minimax-m2.7` (NVIDIA NIM free tier, ~40 RPM cap). Falls back to `claude` (Haiku 4.5) or `openai` (gpt-4o) if those keys are configured. Per-request override via the dropdown in the UI. Configure via `LLM_PROVIDER`, `NVIDIA_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` in `.env`.
+
+---
+
+## Runtime Architecture
+
+The same query that returns in 800 ms locally takes 20–60 s end-to-end on Sonnet through a public tunnel — and serveo (a common free option) closes any HTTP response that hasn't finished within ~10 s, no matter how much keep-alive traffic the server emits. So compute-bound endpoints don't return their result inline; they spawn a background job and let the client poll.
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│  POST /api/v1/{query,graph_extract,graph_dedup}/async (or POST /…)   │
+│       → {"job_id":"abc123"}                returns in <1 s            │
+│                                                                      │
+│  daemon thread:  work() → _update(stage=…) → _update(status="done")  │
+│                                                                      │
+│  GET  /api/v1/{…}/job/{id}                ← every 150 ms then 1.5 s   │
+│       → 200 + {status,stage?,payload?}     Cache-Control: no-store   │
+│       → 404 + {detail}                     Cache-Control: no-store   │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+**Why each piece is there:**
+
+- **`Cache-Control: no-store, no-cache, must-revalidate` on every poll response (and the 404 path too).** Without this, serveo's HTTP/2 edge caches the first `{"status":"pending"}` and re-serves it for the entire polling window — the client polls for 10 minutes, never sees "done", and the user thinks the graph is broken. The 404 path is wrapped for the same reason (a cached 404 from one job could phantom-block a future job_id collision).
+- **First poll fires at 150 ms, not 1500 ms.** A fast LLM call (Haiku on a small graph) routinely finishes in <500 ms; the prior 1500 ms first-poll delay was visible to the user. Subsequent polls fall back to the configured cadence.
+- **Per-poll `AbortSignal.timeout(8000)`.** A single hung fetch (tunnel dropped mid-response) used to stall the overall polling deadline because the wall-clock check ran *between* polls. Each fetch is now self-canceling; the loop retries cleanly.
+- **Per-key concurrent-job semaphore (`_KEY_JOB_LIMIT = 3`).** Bounds memory + LLM spend per API key. The fourth concurrent job from one key returns `429 too many concurrent jobs` instead of spawning another daemon thread.
+- **In-process auth-key cache (60 s TTL).** Without it, every poll opens a fresh `psycopg.connect()` to validate the same `X-API-Key`. At 1.5 s polling intervals over a 30 s job that's ~20 DB connections per job. The cache is invalidated on revoke; negative results are not cached so a freshly minted key isn't blocked by an earlier 401.
+- **Inflight token on the frontend.** If the user fires Q2 while Q1's `graph_extract` is still polling, Q1's eventual result is discarded (token mismatch) rather than re-shuffling the canvas after Q2 already merged.
+- **Layout debounce (250 ms).** Cytoscape's fcose layout takes ~120 ms; back-to-back `merge()` + `applyMergeGroups()` collapse to one layout instead of running them in series.
+- **In-memory job store (`_jobs` dict, 1200 s TTL, hard cap 4096).** No Redis, no SQLite — fine for the current single-worker uvicorn deployment. The trade-off: jobs are lost on server restart, so polling clients get a 404 and have to re-ask. Going multi-worker is a deliberate later step that requires moving `_jobs` to shared storage.
+- **HippoRAG + PubMedBERT loaders behind a double-checked lock.** First-callers race to instantiate the heavy singleton; the lock ensures only one load happens.
+
+The legacy `POST /api/v1/query` (synchronous) and `POST /api/v1/query/stream` (SSE) endpoints still exist for callers that haven't migrated, but they break through any tunnel with a wall-clock cap. New integrations should use the async + polling pair.
 
 ---
 
@@ -291,26 +332,58 @@ existing ES doc. ~2 hours for 33K papers on M-series MPS.
 
 ## API Usage
 
-### Query with citations
+### Async query with citations (recommended)
+
+The async + polling pair is what the UI uses and what survives the tunnel cap. The work runs on a daemon thread; each round-trip stays under any proxy timeout.
+
+```bash
+# 1. Kick off the job — returns immediately with a job_id
+curl -X POST http://localhost:8000/api/v1/query/async \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: <your-key>" \
+  -d '{
+    "query": "What is the efficacy of hydroxychloroquine in SLE?",
+    "options": {"top_k": 20, "retrieval_strategy": "full", "llm_provider": "nim"}
+  }'
+# → {"job_id":"a1b2c3d4..."}
+
+# 2. Poll until done (every ~1.5s; first poll can fire immediately)
+curl http://localhost:8000/api/v1/query/job/a1b2c3d4... \
+  -H "X-API-Key: <your-key>"
+# → {"status":"pending","stage":"synthesizing","model":"claude-haiku-4-5"}
+# → {"status":"done","payload":{ ...the full response below... }}
+```
+
+The poll response carries `Cache-Control: no-store, no-cache, must-revalidate` — don't strip these in any intermediate proxy.
+
+The same shape works for `/graph_extract` and `/graph_dedup`:
+
+```bash
+curl -X POST http://localhost:8000/api/v1/graph_extract \
+  -H "X-API-Key: <key>" -H "Content-Type: application/json" \
+  -d '{"query":"...","answer":"...","chunks":[{"id":1,"text":"..."}],"llm_provider":"nim"}'
+# → {"job_id":"..."}
+# then poll /api/v1/graph_extract/job/{job_id} until status=done
+
+curl -X POST http://localhost:8000/api/v1/graph_dedup \
+  -H "X-API-Key: <key>" -H "Content-Type: application/json" \
+  -d '{"labels":["B-cell","B cell","B cells","IGF-1","IGF1"],"llm_provider":"claude"}'
+# → {"job_id":"..."}
+# then poll /api/v1/graph_dedup/job/{job_id} until status=done
+```
+
+The fourth concurrent job from one key returns `429 too many concurrent jobs (max 3)`.
+
+### Synchronous query (legacy)
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/query \
   -H "Content-Type: application/json" \
   -H "X-API-Key: <your-key>" \
-  -d '{
-    "query": "What is the efficacy of hydroxychloroquine in SLE?",
-    "query_type": "factual",
-    "filters": {
-      "pub_year_from": 2015,
-      "publication_types": ["Randomized Controlled Trial", "Meta-Analysis"]
-    },
-    "options": {
-      "top_k": 20,
-      "retrieval_strategy": "full",
-      "llm_provider": "nim"
-    }
-  }'
+  -d '{"query":"...","options":{"top_k":20,"retrieval_strategy":"full","llm_provider":"nim"}}'
 ```
+
+This response shape is what the async job's `payload` returns; only use the sync endpoint locally or behind a proxy with no wall-clock cap.
 
 `retrieval_strategy` is one of:
 - `bm25` — Elasticsearch keyword scoring only (~20 ms; baseline)
@@ -320,7 +393,7 @@ curl -X POST http://localhost:8000/api/v1/query \
 
 `llm_provider` is one of `extractive` / `claude` / `openai` / `nim`. Defaults to whatever `LLM_PROVIDER` is in `.env`. Per-request override accepts a `<provider>/<model>` form for fine-grained control (e.g. `nim/minimaxai/minimax-m2.7`, `claude/claude-haiku-4-5-20251001`).
 
-All write endpoints (`/query`, `/graph_extract`, `/graph_dedup`, `/keys/*`) require an `X-API-Key` header. See **Public deployment** below.
+All write endpoints (`/query`, `/query/async`, `/graph_extract`, `/graph_dedup`, `/keys/*`) require an `X-API-Key` header. See **Public deployment** below.
 
 **Response structure:**
 ```json
@@ -444,9 +517,22 @@ The admin key prints to stdout once. Save it. To pin a specific value across res
 
 The frontend prompts for an API key on first use, stores it in `localStorage`, and sends `X-API-Key` automatically. The "Share access" button in the consumer sidebar mints a child key.
 
-### 2. Cloudflare Tunnel (named, free)
+### 2. Pick a tunnel
 
-Quick (`cloudflared tunnel --url http://localhost:8000`) gives an ephemeral `*.trycloudflare.com` URL with no signup, but the URL changes every restart. For a stable URL:
+**Option A — serveo (zero-signup SSH reverse tunnel).** Free, no account, ~10 s wall-clock cap on any individual HTTP response (which is exactly why the async-poll architecture exists — see **Runtime Architecture**). serveo drops connections periodically with no SLA; the helper script wraps the ssh in a respawn loop so a flap recovers in seconds without manual intervention.
+
+```bash
+# Foreground (Ctrl-C stops it):
+./scripts/tunnel.sh                  # forwards localhost:8000 as curemom.serveo
+SUBDOMAIN=mylab ./scripts/tunnel.sh 9000
+
+# Background:
+nohup ./scripts/tunnel.sh > /tmp/curemom-tunnel.log 2>&1 &
+```
+
+The script applies the SSH options we settled on: `ServerAliveInterval=30`, `ServerAliveCountMax=3`, `ExitOnForwardFailure=yes`, accept-new host keys. Public URL prints on the first successful SSH session.
+
+**Option B — Cloudflare Tunnel (named, free, no wall-clock cap).** Slower to set up (requires a Cloudflare account) but the URL is stable and there's no 10 s response cap.
 
 ```bash
 brew install cloudflared
@@ -461,13 +547,31 @@ cloudflared tunnel create curemom
 cloudflared tunnel run --url http://localhost:8000 curemom
 ```
 
-Cloudflare prints a `*.cfargotunnel.com` URL. Pair it with a domain via `cloudflared tunnel route dns curemom curemom.example.com` to get a clean URL. Optionally add **Cloudflare Access** (free for ≤50 users) for an SSO layer in front of the API key gate.
+Cloudflare prints a `*.cfargotunnel.com` URL. Pair it with a domain via `cloudflared tunnel route dns curemom curemom.example.com` to get a clean URL. Optionally add **Cloudflare Access** (free for ≤50 users) for an SSO layer in front of the API key gate. For ephemeral use without a Cloudflare account: `cloudflared tunnel --url http://localhost:8000` gives a one-shot `*.trycloudflare.com` URL.
 
-### 3. Operational notes
+### 3. Launching the server
+
+```bash
+# Foreground — best for development.
+cd /path/to/CureMom
+python3 -m uvicorn src.api.main:app --host 127.0.0.1 --port 8000 --log-level info
+
+# Add --reload to auto-restart on save (caveat: drops in-flight jobs → polling
+# clients see 404 on next poll, have to re-ask):
+python3 -m uvicorn src.api.main:app --host 127.0.0.1 --port 8000 --log-level info --reload
+
+# Background:
+nohup python3 -m uvicorn src.api.main:app --host 127.0.0.1 --port 8000 --log-level info > /tmp/curemom.log 2>&1 &
+```
+
+The server is single-worker by design — `_jobs` is a process-local dict, so going multi-worker requires moving the job store to Redis/SQLite first. For 1–5 concurrent users this is fine; the threadpool serves polls and the LLM call runs on a daemon thread.
+
+### 4. Operational notes
 
 - The `.env` file (with API keys) never leaves the host machine — it's gitignored and read by uvicorn directly.
 - The `/llm/status` endpoint is **not** auth-gated — it's used by the frontend to populate the provider dropdown before the user enters a key. It only reports availability + model strings, never key material.
-- Without an admin Cloudflare account, you can fall back to `cloudflared tunnel --url http://localhost:8000` for ephemeral access.
+- Restart uvicorn to pick up server-side changes (when not running with `--reload`): `pkill -f "uvicorn src.api.main"` then relaunch. The SSH tunnel can stay up — it'll briefly 502 during the gap, then reconnect to the new uvicorn.
+- Revocations: set `is_revoked = TRUE` in `api_keys` and call `src.api.auth.invalidate_key_cache(<key>)` (or restart) so the 60-s key cache doesn't keep accepting the dead key.
 
 ---
 
@@ -494,11 +598,16 @@ src/
     ner_pipeline.py       — HuggingFace transformer biomedical NER (Phase 2)
     splade_pipeline.py    — SPLADE sparse-vector encoding for ES (Phase 4)
   api/
-    main.py               — FastAPI app + all endpoints
+    main.py               — FastAPI app + endpoints + async job store + per-key semaphore
+    auth.py               — X-API-Key dependency + 60 s in-process cache (admin / child-key model)
     response_builder.py   — Structured response + passage-level citation provenance
-    llm_providers.py      — Swappable LLM (Extractive / Ollama / Claude / OpenAI)
+    llm_providers.py      — Swappable LLM (Extractive / Claude / OpenAI / NVIDIA NIM)
     classifier.py         — Query complexity classifier (Phase 3)
     citation_verifier.py  — Citation [N] parser + lexical-overlap check (Phase 3)
+    drug_lookup.py        — FDA/openFDA + Wikipedia drug card lookup (concurrent with retrieval)
+    query_analyzer.py     — Claude Haiku JSON analyzer (drug/effect routing, synonym expansion)
+    graph_extractor.py    — LLM relation extraction (claude/openai/nim) + partial-JSON recovery
+    graph_merger.py       — LLM entity-dedup for the Merge button
 scripts/
   ingest.py               — CLI: run the ingestion pipeline (PubMed metadata + abstracts)
   fetch_chembl.py         — CLI: ChEMBL compound-target data + PubMed queuing
@@ -508,6 +617,19 @@ scripts/
   extract_entities.py     — CLI: HF transformer NER on chunks (Phase 2)
   build_entity_graph.py   — CLI: MeSH/NER entity graph builder (Phase 4)
   encode_splade.py        — CLI: SPLADE sparse vectors → ES (Phase 4)
+  tunnel.sh               — serveo reverse-tunnel wrapper with respawn-on-drop
+tests/
+  test_graph_parser.py             — _parse_graph + partial-JSON recovery (10 cases)
+  test_job_poll_headers.py         — Cache-Control: no-store on every poll path
+  test_auth_cache.py               — require_api_key TTL cache (hit / invalidate / expiry / 401 not cached)
+  test_job_semaphore.py            — _KEY_JOB_LIMIT = 3 enforcement + concurrent contention
+  test_graph_input_truncation.py   — extract_graph surfaces "truncated input:" when answer > 5 KB
+  test_tunnel_integration.py       — opt-in (CUREMOM_TUNNEL_URL + CUREMOM_API_KEY) end-to-end against the live tunnel
+frontend/
+  index.html              — split-view chat + graph panel
+  app.js                  — async polling (QA + graph), inflight token, AbortSignal-timed fetches
+  graph.js                — Cytoscape.js + fcose, applyMergeGroups, debounced _scheduleLayout
+  style.css               — dark theme + responsive split
 docker-compose.yml        — postgres+pgvector, elasticsearch, app
 Dockerfile
 requirements.txt
@@ -584,19 +706,50 @@ See [`TODO.md`](TODO.md) for the full task list.
 - ✅ **Phase 2 (code):** PubMedBERT embedder + section-aware chunking; HF transformer NER (`d4data/biomedical-ner-all`); RRF hybrid path wired
 - ✅ **Phase 3:** Cloud-only LLM dispatch (extractive / Anthropic Claude / OpenAI / NVIDIA NIM); `[N]` citation parser; query classifier (Claude Haiku); citation verifier; `/llm/status` health endpoint
 - ✅ **Phase 4:** HippoRAG entity graph (~5M+ edges from MeSH + NER co-occurrence) with NetworkX Personalized PageRank rerank — no Neo4j; SPLADE sparse-vector pipeline ready
-- ✅ **Live knowledge-graph panel:** Cytoscape.js canvas; relations-only LLM extraction with answer-text grounding (no NER at query time); web-like fcose layout; type-based node coloring (Drug / Disease / Gene / Anatomy / Symptom / Other); click popover with Ask/Remove; **Merge** button for LLM-driven dedup of equivalent entities; **node search** in the topbar; provider dispatch — picks Anthropic / OpenAI / NIM based on the QA dropdown
+- ✅ **Async-job runtime:** every compute-bound endpoint runs as POST→job_id + GET-poll-until-done with `Cache-Control: no-store` on every poll path; per-key concurrent-job semaphore (limit 3, 429 on overflow); in-process API-key cache (60 s TTL); double-checked locks around the heavy lazy singletons (PubMedBERT, HippoRAG)
+- ✅ **Live knowledge-graph panel:** Cytoscape.js canvas; relations-only LLM extraction with answer-text grounding (no NER at query time); web-like fcose layout (debounced); type-based node coloring (Drug / Disease / Gene / Anatomy / Symptom / Other); click popover with Ask/Remove; **Merge** button for LLM-driven dedup of equivalent entities; **node search** in the topbar; provider dispatch — picks Anthropic / OpenAI / NIM based on the QA dropdown; partial-output recovery + truncation surfacing; inflight token discards stale `graph_extract` results when the user fires a new question before the previous graph returns
+- ✅ **Drug lookup parallelized with retrieval:** the two stages run on separate threads instead of in series, so drug-mentioning queries no longer pay the full ~1–3 s FDA round-trip on top of retrieval
+- ✅ **Tunnel auto-reconnect:** `scripts/tunnel.sh` wraps the serveo SSH command in a respawn loop with backoff so a drop recovers in seconds without manual intervention
 - ✅ **Adaptive retrieval top-k:** retriever pulls a 100-candidate pool and returns top 10% (floor 5, cap 20) instead of a fixed top-k=10/12; broad queries get more chunks, narrow factual lookups get fewer
 - ✅ **Public-deployment auth:** X-API-Key on /query / /graph_extract / /graph_dedup; admin keys mint unlimited child keys, each non-admin key mints exactly one. Bootstrap admin key created on first run via `auth.bootstrap_admin_key`.
 - ✅ **Corpora ingested:** SLE + muscle physiology + ichthyosis (15,613 papers, 7 MeSH topics) + creatine (10,432 papers, pharmacology + clinical)
+- ✅ **Test suite:** 29 in-process cases (graph parser, poll headers, auth cache, job semaphore, input truncation) + 9 opt-in tunnel cases gated on `CUREMOM_TUNNEL_URL`
 
 **Pending offline runs (heavy compute):**
-- Run `scripts/embed.py` — generate 768-dim PubMedBERT vectors over chunks (~1 hr); enables real `hybrid` and `full` strategies (currently degrade to BM25 + HippoRAG)
+- Run `scripts/embed.py --chunk-fulltext` on the creatine corpus — section-aware chunks for the 2,586 OA full-text papers are not yet generated (only abstract chunks exist; queries surface abstract-level only)
 - Run `scripts/encode_splade.py` — populate Elasticsearch `sparse_vector` field (~2 hr)
 
 **Next:**
-- Streaming responses for Claude / OpenAI (Server-Sent Events)
+- Move `_jobs` to Redis/SQLite so uvicorn can run with `--workers N` without losing in-flight jobs
 - Cross-encoder re-rank on top-20 (e.g. `ms-marco-MiniLM-L-12-v2`)
 - Expand corpus: RA, myositis, systemic sclerosis, sarcopenia, exercise transcriptomics
+
+---
+
+## Tests
+
+`pytest tests/` runs the in-process suite end-to-end against a `TestClient` (no Postgres / Elasticsearch / network needed). The opt-in tunnel suite is the only piece that hits the real wire:
+
+```bash
+# In-process suite (29 cases, <1s):
+pytest tests/
+
+# End-to-end through the live tunnel — set both env vars first:
+CUREMOM_TUNNEL_URL=https://...serveousercontent.com \
+CUREMOM_API_KEY=<your-key> \
+pytest tests/test_tunnel_integration.py -v
+```
+
+Coverage:
+
+| File | What it pins down |
+|---|---|
+| `test_graph_parser.py` | `_parse_graph` survives every shape of malformed LLM JSON: clean, fenced, truncated mid-relation, truncated after complete relations (salvage + `_truncated` flag), invalid type label, wrong-shape fields. |
+| `test_job_poll_headers.py` | Every poll path — pending, done, and 404 unknown-job — returns `Cache-Control: no-store, no-cache, must-revalidate`. Without this the production "graph never shows" bug regresses. |
+| `test_auth_cache.py` | Second `require_api_key` call within 60 s skips the DB; invalidation drops the entry; expiry forces a re-fetch; failed lookups (401) are NOT cached so a freshly minted key isn't blocked. |
+| `test_job_semaphore.py` | A single key can take exactly 3 slots; the 4th `_acquire_key_slot` returns `False` (route handler turns it into 429); released slots are reusable; keys are isolated; 20 concurrent threads acquire exactly 3. |
+| `test_graph_input_truncation.py` | A >5000-char answer sets `payload.error` starting with `truncated input:` so the frontend regex catches it. A short answer doesn't trigger any truncation note. |
+| `test_tunnel_integration.py` | Opt-in. Exercises serveo + the live LLM with the SLE question, the graph_extract flow, and the merge flow; confirms `Cache-Control` headers actually survive the proxy. |
 
 ---
 
@@ -605,5 +758,8 @@ See [`TODO.md`](TODO.md) for the full task list.
 - The full PubMed corpus (35M papers) is intentionally not downloaded. Expand scope by adding topics to `src/ingestion/topics.py`.
 - Citation provenance is tracked at chunk level (section + paragraph + char offsets), not just paper level.
 - All LLM responses are grounded: every claim requires an inline `[N]` citation to an ingested chunk.
+- The knowledge-graph LLM is **never trusted to invent entities**: every subject/object label must appear as a case-insensitive substring of the answer text, and vague predicates ("is managed by", "involves") + generic single-word labels ("protein", "RNA") are dropped server-side. The "answer is the authoritative source" rule means the graph can never assert relations the user didn't see in the prose.
+- Compute-bound endpoints are **always** async + polling — never inline, never SSE on long calls. SSE was tried first and broke through serveo at the 10 s mark; the polling pattern is what every long-running cloud API (OpenAI runs, HF endpoints, Vertex LRO) settled on for the same reason.
+- The job store is **deliberately in-memory** for now. A Redis/SQLite migration is a one-day change but unnecessary until we go multi-worker. The current trade-off (lost on restart → polling clients see 404) is acceptable for ≤5 concurrent users.
 - ChEMBL queries are by **molecular target** (e.g. JAK1), not by compound name — this avoids encoding prior beliefs about which drugs work.
 - `targets.py` is a 30-target seed list for fast local testing. For production, use `--all-targets` to cover the full ~3,000-target clinical druggable proteome.
