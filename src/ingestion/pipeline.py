@@ -150,7 +150,6 @@ def esearch_pmids(
     page_size = 10000
 
     while retstart < count:
-        config.throttle()
         fetch_params = {
             **config.ncbi_params(),
             "db": "pubmed",
@@ -162,12 +161,37 @@ def esearch_pmids(
             # Note: NCBI ignores retmode=text for history-server queries and always
             # returns XML — parse <Id> elements instead of splitting on newlines.
         }
-        response = _ncbi_get(client, ESEARCH_URL, fetch_params)
-        page_root = etree.fromstring(response)
-        page_pmids = [el.text.strip() for el in page_root.findall(".//Id") if el.text]
+        # Per-page retry: NCBI's history-server flap can hit individual
+        # pages mid-pagination — without retry we'd silently accept an
+        # empty page and cap the topic at one good page (the bug that
+        # left missense / respiratory / fever / gi at 9999 each).
+        page_pmids: list[str] | None = None
+        last_err: str | None = None
+        import time
+        for attempt in range(1, 4):
+            config.throttle()
+            response = _ncbi_get(client, ESEARCH_URL, fetch_params)
+            page_root = etree.fromstring(response)
+            err = page_root.findtext("ERROR")
+            if err:
+                last_err = err
+                wait = 5 * attempt
+                logger.warning(
+                    "ESearch page-fetch error (retstart=%d, attempt %d/3): %s — retrying in %ds",
+                    retstart, attempt, err, wait,
+                )
+                time.sleep(wait)
+                continue
+            page_pmids = [el.text.strip() for el in page_root.findall(".//Id") if el.text]
+            break
+        if page_pmids is None:
+            raise RuntimeError(
+                f"ESearch page-fetch kept returning <ERROR> after 3 attempts "
+                f"at retstart={retstart}: {last_err}"
+            )
         all_pmids.extend(page_pmids)
         retstart += page_size
-        logger.debug("Fetched %d/%d PMIDs", len(all_pmids), count)
+        logger.info("Fetched %d/%d PMIDs", len(all_pmids), count)
 
     return all_pmids
 
