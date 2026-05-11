@@ -465,14 +465,15 @@ async function _onMergeClick() {
   try {
     const r = await apiFetch(`${API}/api/v1/graph_dedup`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
       body: JSON.stringify({ labels, llm_provider: provider }),
     });
-    if (!r.ok) {
+    if (!r.ok || !r.body) {
       console.warn('[KGraph] /graph_dedup HTTP', r.status);
       return;
     }
-    const payload = await r.json();
+    const payload = await _readGraphSSE(r);
+    if (!payload) return;
     const groups = payload.groups || [];
     console.log('[KGraph] received', groups.length, 'merge groups:', groups);
     const before = KGraph.size().nodes;
@@ -545,14 +546,20 @@ async function _extractGraph(query, response, citations) {
       try {
         const r = await apiFetch(`${API}/api/v1/graph_extract`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
           body: JSON.stringify({ query, answer: cleanAnswer, chunks, llm_provider: provider }),
         });
-        if (!r.ok) {
+        if (!r.ok || !r.body) {
+          // 5xx are usually tunnel hiccups — worth a retry. 4xx are terminal.
+          if (r.status >= 500 && attempt < MAX_ATTEMPTS) {
+            console.warn(`[KGraph] graph_extract HTTP ${r.status}; retrying…`);
+            await new Promise(res => setTimeout(res, 600));
+            continue;
+          }
           console.warn('[KGraph] /graph_extract HTTP', r.status);
           return;
         }
-        payload = await r.json();
+        payload = await _readGraphSSE(r);
         break;
       } catch (err) {
         lastErr = err;
@@ -868,6 +875,8 @@ async function _runQueryStream(typing, reqBody, query) {
         data = obj.result;
       } else if (obj.stage === 'error') {
         errEvent = obj;
+      } else if (obj.stage === 'keepalive') {
+        // heartbeat — keeps the tunnel alive, no UI update
       } else {
         _setTypingStage(typing, obj);
       }
@@ -1258,6 +1267,33 @@ function closeModal(e) {
   if (e.target === document.getElementById('citation-modal')) {
     document.getElementById('citation-modal').hidden = true;
   }
+}
+
+// Read an SSE response that emits a single final `{ok, payload|error}`
+// event, with `: keepalive` comments in between. Used by /graph_extract and
+// /graph_dedup. Returns the payload on success, throws on backend error,
+// returns null if the stream ends without a final event.
+async function _readGraphSSE(response) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const events = buf.split('\n\n');
+    buf = events.pop() || '';
+    for (const raw of events) {
+      const line = raw.split('\n').find(l => l.startsWith('data: '));
+      if (!line) continue;
+      let obj;
+      try { obj = JSON.parse(line.slice(6)); } catch { continue; }
+      if (obj.stage === 'keepalive') continue;  // heartbeat ping, ignore
+      if (obj.ok === true) return obj.payload;
+      if (obj.ok === false) throw new Error(obj.error || 'graph backend error');
+    }
+  }
+  return null;
 }
 
 // ── Utilities ────────────────────────────────────────────────────────────────

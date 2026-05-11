@@ -340,21 +340,22 @@ def query(
 
 
 def _with_heartbeat(source, interval_s: float = 3.0):
-    """Wrap a sync generator so the stream emits an SSE comment every
-    `interval_s` seconds during gaps. Without this, localhost.run /
-    Cloudflare / serveo / nginx kill the TCP connection during long
-    silent stages (e.g. a 30s drug_lookup hitting Wikipedia/PubChem,
-    or a 60s LLM call between `synthesizing` and `verifying`), and the
-    browser fetch throws "Load failed."
+    """Wrap a sync generator so the stream emits a real SSE data event
+    every `interval_s` seconds during gaps.
 
-    Default interval is 3 s — measured: serveo's upstream-idle timeout
-    is somewhere around 5–6 s, well under our previous 15 s heartbeat.
-    Three seconds keeps comfortable margin without flooding the wire.
+    The keepalive is a real `data: {"stage":"keepalive"}` event — NOT a
+    comment line. Serveo's edge proxy ignores SSE comments for its
+    upstream-idle timer (we measured ~10 s before it 502s a long Sonnet
+    call even with 3 s `: keepalive` comments). A real data event counts
+    as activity everywhere.
+
+    Clients should filter `stage === "keepalive"` events out (the
+    /query/stream parser ignores them via _STAGE_LABELS lookup; the
+    graph SSE parser explicitly skips them).
 
     The source generator runs on a daemon thread; the main loop here
     pumps real items as they arrive and falls back to a heartbeat when
-    the queue is idle. Comments (lines starting with `:`) are valid SSE
-    and ignored by clients.
+    the queue is idle.
     """
     import queue
     import threading
@@ -378,7 +379,7 @@ def _with_heartbeat(source, interval_s: float = 3.0):
         try:
             kind, payload = q.get(timeout=interval_s)
         except queue.Empty:
-            yield ": keepalive\n\n"
+            yield 'data: {"stage":"keepalive"}\n\n'
             continue
         if kind is DONE:
             return
@@ -527,53 +528,66 @@ def query_stream(
 def graph_extract(
     req: GraphExtractRequest,
     _key: Annotated[KeyRecord, Depends(require_api_key)] = None,
-) -> dict[str, Any]:
+) -> StreamingResponse:
     """Per-turn knowledge-graph payload for the chat panel.
 
-    Called by the frontend AFTER the answer renders. Runs biomedical NER
-    over the question + answer + cited chunk texts, then asks the LLM to
-    emit JSON triples between those entities. Hallucinated triples
-    (entities not in the NER set, or with no evidence chunk_ids) are
-    dropped server-side. The frontend merges the returned nodes/edges
-    into its session-local graph state.
+    Streams a single SSE event with the payload (or an error event) so the
+    tunnel sees periodic `: keepalive` heartbeats during the long LLM call
+    and doesn't 502. With Sonnet 4.6 the round-trip can be 30-60 s, which
+    exceeds serveo's idle-upstream cutoff for non-streaming responses.
 
-    This is a separate endpoint from /api/v1/query so the chat answer
-    can render at its current speed; the graph spinner waits on the
-    second LLM call without blocking the user.
+    The frontend reads the stream the same way it reads /query/stream:
+    skip heartbeats, capture the final `{ok, payload|error}` event.
     """
-    chunk_dicts = [{"id": c.id, "text": c.text} for c in req.chunks]
-    try:
-        payload = extract_graph(req.query, req.answer, chunk_dicts,
-                                provider_spec=req.llm_provider)
-    except Exception as exc:
-        logger.exception("graph_extract failed")
-        raise HTTPException(
-            status_code=502,
-            detail=f"graph_extract failed: {type(exc).__name__}: {exc}",
-        )
-    return payload.to_dict()
+    def gen():
+        try:
+            chunk_dicts = [{"id": c.id, "text": c.text} for c in req.chunks]
+            payload = extract_graph(req.query, req.answer, chunk_dicts,
+                                    provider_spec=req.llm_provider)
+            yield f"data: {json.dumps({'ok': True, 'payload': payload.to_dict()})}\n\n"
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("graph_extract failed")
+            yield f"data: {json.dumps({'ok': False, 'error': f'{type(exc).__name__}: {exc}'})}\n\n"
+
+    return StreamingResponse(
+        _with_heartbeat(gen(), interval_s=3),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
 
 @app.post("/api/v1/graph_dedup")
 def graph_dedup(
     req: GraphDedupRequest,
     _key: Annotated[KeyRecord, Depends(require_api_key)] = None,
-) -> dict[str, Any]:
+) -> StreamingResponse:
     """Dedup equivalent biomedical entity labels via the LLM.
 
-    Frontend sends the current node labels; we call the LLM to group
-    variants ("B-cell" / "B cell" / "B cells") and return the groupings.
-    The frontend then collapses each group into a single canonical node.
+    Streamed for the same reason as /graph_extract: Sonnet's longer
+    thinking time can outlast serveo's non-streaming upstream timeout
+    and surface as a 502.
     """
-    try:
-        groups = dedup_entities(req.labels, provider_spec=req.llm_provider)
-    except Exception as exc:
-        logger.exception("graph_dedup failed")
-        raise HTTPException(
-            status_code=502,
-            detail=f"graph_dedup failed: {type(exc).__name__}: {exc}",
-        )
-    return {"groups": [g.to_dict() for g in groups]}
+    def gen():
+        try:
+            groups = dedup_entities(req.labels, provider_spec=req.llm_provider)
+            yield f"data: {json.dumps({'ok': True, 'payload': {'groups': [g.to_dict() for g in groups]}})}\n\n"
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("graph_dedup failed")
+            yield f"data: {json.dumps({'ok': False, 'error': f'{type(exc).__name__}: {exc}'})}\n\n"
+
+    return StreamingResponse(
+        _with_heartbeat(gen(), interval_s=3),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
 
 # ─── Key management ───────────────────────────────────────────────────────────
