@@ -478,6 +478,10 @@ async function _onMergeClick() {
       jobUrlPrefix: `${API}/api/v1/graph_dedup/job`,
       startBody: { labels, llm_provider: provider },
       pollMs: 750,  // tighter cadence — dedup output is short, don't waste a 1.5 s tail
+      onProgress: (s) => {
+        _refreshGraphChrome(`Merging via ${provider || 'default'}… ${s.elapsed_s}s`);
+        if (btn) btn.textContent = `Merging… ${s.elapsed_s}s`;
+      },
     });
     if (!payload) {
       _refreshGraphChrome('Merge returned no payload');
@@ -562,6 +566,12 @@ async function _extractGraph(query, response, citations) {
         startUrl: `${API}/api/v1/graph_extract`,
         jobUrlPrefix: `${API}/api/v1/graph_extract/job`,
         startBody: { query, answer: cleanAnswer, chunks, llm_provider: provider },
+        onProgress: (s) => {
+          // Only the most-recent extract owns the chrome — a stale tick
+          // from an older call must not overwrite the newer one's state.
+          if (token !== _graphExtractToken) return;
+          _refreshGraphChrome(`Extracting graph via ${provider || 'default'}… ${s.elapsed_s}s`);
+        },
       });
     } catch (err) {
       lastErr = err;
@@ -1242,7 +1252,7 @@ function closeModal(e) {
 //   startUrl: POST → returns {job_id}
 //   jobUrlPrefix: GET ${jobUrlPrefix}/${job_id} → returns {status, payload?, error?}
 // Returns the final `payload` dict, throws on backend error or polling timeout.
-async function _runGraphJob({ startUrl, jobUrlPrefix, startBody, maxWaitMs = 600000, pollMs = 1500 }) {
+async function _runGraphJob({ startUrl, jobUrlPrefix, startBody, maxWaitMs = 600000, pollMs = 1500, onProgress = null }) {
   const r = await apiFetch(startUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -1262,6 +1272,9 @@ async function _runGraphJob({ startUrl, jobUrlPrefix, startBody, maxWaitMs = 600
   // the first miss, fall back to the configured pollMs cadence.
   // Per-fetch AbortSignal.timeout(8000) guards against a hung tunnel: a
   // single dropped response can no longer stall the overall deadline.
+  // The server publishes a heartbeat with `elapsed_s` every 500 ms; we
+  // pass each pending snapshot to onProgress so the caller can surface
+  // "still working… Ns" UI.
   const deadline = Date.now() + maxWaitMs;
   let firstPoll = true;
   while (Date.now() < deadline) {
@@ -1283,7 +1296,11 @@ async function _runGraphJob({ startUrl, jobUrlPrefix, startBody, maxWaitMs = 600
     const status = await pr.json().catch(() => ({}));
     if (status.status === 'done') return status.payload;
     if (status.status === 'error') throw new Error(status.error || 'graph job failed');
-    // status === 'pending' → keep polling
+    // status === 'pending' → keep polling. Forward the heartbeat snapshot
+    // (elapsed_s, stage, …) to the caller for live UI updates.
+    if (onProgress && typeof status.elapsed_s === 'number') {
+      try { onProgress(status); } catch (_) { /* never let a UI bug break polling */ }
+    }
   }
   throw new Error(`graph job timed out after ${Math.round(maxWaitMs / 1000)}s polling`);
 }

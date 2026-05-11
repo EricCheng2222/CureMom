@@ -19,10 +19,14 @@ so this module returns just what changed in the current turn.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
 import re
+import threading
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -73,6 +77,43 @@ class GraphPayload:
         if self.error:
             out["error"] = self.error
         return out
+
+
+# ─── Heartbeat helper — surfaces "still working" while the LLM runs ─────────
+#
+# Without this the job state sits at `status=pending` for the entire LLM call
+# (10–40 s on Sonnet/NIM). A background thread bumps `elapsed_s` every 500 ms
+# so the poll endpoint can hand the client a ticking counter to display.
+
+@contextlib.contextmanager
+def emit_heartbeat(
+    update: Callable[..., None] | None,
+    *, stage: str, interval_s: float = 0.5,
+):
+    """Run a background thread that calls update(elapsed_s=N, stage=…) until
+    the with-block exits. No-op if update is None."""
+    if update is None:
+        yield
+        return
+    stop = threading.Event()
+    start = time.monotonic()
+
+    def _tick() -> None:
+        while not stop.wait(interval_s):
+            try:
+                update(elapsed_s=int(time.monotonic() - start), stage=stage)
+            except Exception:  # noqa: BLE001
+                # The job may have been GC'd from under us — never let the
+                # heartbeat crash the worker.
+                pass
+
+    t = threading.Thread(target=_tick, daemon=True)
+    t.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        t.join(timeout=1)
 
 
 # ─── Slug helper for stable node ids ─────────────────────────────────────────
@@ -613,6 +654,7 @@ def extract_graph(
     answer: str,
     chunks: list[dict[str, Any]],
     provider_spec: str | None = None,
+    update: Callable[..., None] | None = None,
 ) -> GraphPayload:
     """Extract a per-turn knowledge-graph payload.
 
@@ -644,10 +686,13 @@ def extract_graph(
     }
 
     try:
-        graph_obj = _llm_graph(
-            query=query, answer=answer,
-            provider_spec=provider_spec,
-        )
+        # Heartbeat ticks elapsed_s on the job every 500 ms so the client
+        # can show "Extracting graph… Ns" instead of a frozen spinner.
+        with emit_heartbeat(update, stage="extracting_graph"):
+            graph_obj = _llm_graph(
+                query=query, answer=answer,
+                provider_spec=provider_spec,
+            )
     except Exception as exc:
         msg = f"{type(exc).__name__}: {exc}"
         logger.warning("graph_extract: LLM call failed (%s); returning empty graph", msg)

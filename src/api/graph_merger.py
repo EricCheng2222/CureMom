@@ -21,10 +21,13 @@ import json
 import logging
 import os
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
+
+from .graph_extractor import emit_heartbeat
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +87,7 @@ def dedup_entities(
     labels: list[str],
     provider_spec: str | None = None,
     timeout_s: float | None = None,
+    update: Callable[..., None] | None = None,
 ) -> list[MergeGroup]:
     """Ask the LLM to group equivalent biomedical entity labels.
 
@@ -105,12 +109,15 @@ def dedup_entities(
     user_msg = f"Labels ({len(labels)}):\n" + "\n".join(f"- {lbl}" for lbl in labels)
     target = _resolve_provider(provider_spec)
 
-    if target == "claude":
-        raw = _claude_dedup(user_msg, timeout_s)
-    elif target == "openai":
-        raw = _openai_dedup(user_msg, timeout_s)
-    else:
-        raw = _nim_dedup(user_msg, provider_spec, timeout_s)
+    # Heartbeat: tick elapsed_s on the job every 500 ms so the client can
+    # show "Merging… Ns" instead of a frozen button while the LLM runs.
+    with emit_heartbeat(update, stage="dedup_entities"):
+        if target == "claude":
+            raw = _claude_dedup(user_msg, timeout_s)
+        elif target == "openai":
+            raw = _openai_dedup(user_msg, timeout_s)
+        else:
+            raw = _nim_dedup(user_msg, provider_spec, timeout_s)
 
     return _parse_groups(raw, allowed=set(labels))
 

@@ -773,14 +773,18 @@ def graph_extract(
                    "wait for an in-flight one to finish",
         )
 
-    def work() -> dict[str, Any]:
+    def work(update: Callable[..., None]) -> dict[str, Any]:
         chunk_dicts = [{"id": c.id, "text": c.text} for c in req.chunks]
-        payload = extract_graph(req.query, req.answer, chunk_dicts,
-                                provider_spec=req.llm_provider)
+        payload = extract_graph(
+            req.query, req.answer, chunk_dicts,
+            provider_spec=req.llm_provider,
+            update=update,
+        )
         return payload.to_dict()
     return {
         "job_id": _start_job(
-            work, on_complete=lambda kid=_key.id: _release_key_slot(kid),
+            work, pass_update=True,
+            on_complete=lambda kid=_key.id: _release_key_slot(kid),
         )
     }
 
@@ -806,12 +810,15 @@ def graph_dedup(
                    "wait for an in-flight one to finish",
         )
 
-    def work() -> dict[str, Any]:
-        groups = dedup_entities(req.labels, provider_spec=req.llm_provider)
+    def work(update: Callable[..., None]) -> dict[str, Any]:
+        groups = dedup_entities(
+            req.labels, provider_spec=req.llm_provider, update=update,
+        )
         return {"groups": [g.to_dict() for g in groups]}
     return {
         "job_id": _start_job(
-            work, on_complete=lambda kid=_key.id: _release_key_slot(kid),
+            work, pass_update=True,
+            on_complete=lambda kid=_key.id: _release_key_slot(kid),
         )
     }
 
