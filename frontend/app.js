@@ -214,11 +214,21 @@ async function populateProviderDropdowns() {
       sel.appendChild(opt);
     }
     if (nim.available) {
-      const opt = document.createElement('option');
-      opt.value = 'nim';
-      opt.textContent = `NVIDIA NIM (${nim.model})`;
-      opt.dataset.isDefault = '1';
-      sel.appendChild(opt);
+      // Two NIM variants surfaced explicitly. Llama 3.1 70B is the default
+      // because it's non-reasoning — fast (~7 s) on structured-output tasks
+      // like graph extraction + merge. MiniMax M2.7 is a reasoning model
+      // that emits ~3 K thinking tokens before the answer (~100 s on a
+      // 37-node merge); NIM doesn't honor enable_thinking=False on it.
+      const llamaOpt = document.createElement('option');
+      llamaOpt.value = 'nim/meta/llama-3.1-70b-instruct';
+      llamaOpt.textContent = 'NIM Llama 3.1 70B (fast, default)';
+      llamaOpt.dataset.isDefault = '1';
+      sel.appendChild(llamaOpt);
+
+      const minimaxOpt = document.createElement('option');
+      minimaxOpt.value = 'nim/minimaxai/minimax-m2.7';
+      minimaxOpt.textContent = 'NIM MiniMax M2.7 (reasoning — slow)';
+      sel.appendChild(minimaxOpt);
     }
 
     // Default to NIM (free tier) if available, else first non-extractive

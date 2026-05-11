@@ -247,6 +247,31 @@ TOPICS: list[IngestionTopic] = [
         description="Ichthyosis treatments — retinoids, emollients, gene therapy, clinical trials",
         priority=1,
     ),
+    # ── Clavus / callosities (focal hyperkeratosis) ─────────────────────────
+    # Clavus = corn (focal, deep, painful); callus / tyloma = diffuse.
+    # Shares biology with ichthyosis (cornification, keratin) but its own
+    # clinical / podiatry literature: pressure-induced hyperkeratosis,
+    # diabetic foot, mechanical offloading, surgical excision, keratolytics.
+
+    IngestionTopic(
+        name="clavus_core",
+        mesh_query='"Callosities"[MeSH] OR "clavus"[Title/Abstract] OR "heloma"[Title/Abstract]',
+        description="Clavus / corn / callus — focal hyperkeratosis from pressure or friction",
+        priority=1,
+    ),
+    IngestionTopic(
+        name="clavus_treatment",
+        mesh_query='("Callosities"[MeSH] OR "clavus"[Title/Abstract] OR "heloma"[Title/Abstract]) AND ("therapy"[Subheading] OR "drug therapy"[Subheading] OR "surgery"[Subheading] OR "Randomized Controlled Trial"[Publication Type] OR "keratolytic"[Title/Abstract])',
+        description="Clavus / callus treatment — keratolytics, paring, surgical excision, offloading",
+        priority=1,
+    ),
+    IngestionTopic(
+        name="clavus_diabetic_foot",
+        mesh_query='("Callosities"[MeSH] OR "clavus"[Title/Abstract] OR "callus"[Title/Abstract]) AND ("Diabetic Foot"[MeSH] OR "diabetic foot"[Title/Abstract])',
+        description="Clavus in the diabetic foot — high-risk pressure ulcer precursor",
+        priority=2,
+    ),
+
     # ── Creatine (mechanism + clinical) ─────────────────────────────────────
     # Pulled out of the broader pharmacology_nutritional_compounds bucket so
     # the corpus has dedicated coverage. Two angles:

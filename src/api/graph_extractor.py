@@ -358,7 +358,7 @@ def _nim_graph(user_msg: str, provider_spec: str | None, timeout_s: float) -> di
     if provider_spec and provider_spec.startswith("nim/"):
         model = provider_spec.split("/", 1)[1]
     else:
-        model = os.environ.get("NIM_MODEL", "minimaxai/minimax-m2.7")
+        model = os.environ.get("NIM_MODEL", "meta/llama-3.1-70b-instruct")
     base_url = os.environ.get("NIM_BASE_URL", "https://integrate.api.nvidia.com/v1")
 
     logger.info("graph_extract: calling NIM (model=%s, timeout=%.0fs)", model, timeout_s)

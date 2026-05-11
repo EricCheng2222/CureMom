@@ -176,6 +176,15 @@ def _openai_dedup(user_msg: str, timeout_s: float) -> str:
 
 
 def _nim_dedup(user_msg: str, provider_spec: str | None, timeout_s: float) -> str:
+    """Call NIM (OpenAI-compatible) for dedup.
+
+    The NIM_MODEL default is `meta/llama-3.1-70b-instruct` — a non-reasoning
+    sibling on the same provider. Reasoning models like minimaxai/minimax-m2.7
+    emit ~3 K thinking tokens before any JSON (100+ s wall clock) and NIM
+    doesn't honor any of the standard "disable thinking" knobs. Users who
+    explicitly want a reasoning model can pick `nim/minimaxai/minimax-m2.7`
+    in the dropdown.
+    """
     import openai
 
     api_key = os.environ.get("NVIDIA_API_KEY", "").strip()
@@ -184,7 +193,7 @@ def _nim_dedup(user_msg: str, provider_spec: str | None, timeout_s: float) -> st
     if provider_spec and provider_spec.startswith("nim/"):
         model = provider_spec.split("/", 1)[1]
     else:
-        model = os.environ.get("NIM_MODEL", "minimaxai/minimax-m2.7")
+        model = os.environ.get("NIM_MODEL", "meta/llama-3.1-70b-instruct")
     base_url = os.environ.get("NIM_BASE_URL", "https://integrate.api.nvidia.com/v1")
 
     logger.info("graph_dedup: calling NIM (model=%s, timeout=%.0fs)", model, timeout_s)
