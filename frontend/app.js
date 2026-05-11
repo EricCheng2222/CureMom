@@ -524,24 +524,47 @@ async function _extractGraph(query, response, citations) {
   console.log('[KGraph] POST /api/v1/graph_extract with', chunks.length, 'chunks, provider:', provider);
 
   if (_isGraphPanelOpen()) _showGraphSpinner(true);
+  // Retry transport-level failures once. The LLM call is 10-20 s and the
+  // tunnel sometimes drops the connection mid-flight, which surfaces as
+  // a thrown TypeError; without retry the graph silently stays stale —
+  // which is why re-submitting the same query has been making nodes appear.
+  // HTTP error responses (4xx/5xx) and empty payloads are terminal.
+  const MAX_ATTEMPTS = 2;
+  let payload = null;
+  let lastErr = null;
   try {
-    const r = await apiFetch(`${API}/api/v1/graph_extract`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query, answer: cleanAnswer, chunks, llm_provider: provider }),
-    });
-    if (!r.ok) {
-      console.warn('[KGraph] /graph_extract HTTP', r.status);
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      try {
+        const r = await apiFetch(`${API}/api/v1/graph_extract`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query, answer: cleanAnswer, chunks, llm_provider: provider }),
+        });
+        if (!r.ok) {
+          console.warn('[KGraph] /graph_extract HTTP', r.status);
+          return;
+        }
+        payload = await r.json();
+        break;
+      } catch (err) {
+        lastErr = err;
+        if (attempt < MAX_ATTEMPTS) {
+          console.warn(`[KGraph] graph_extract attempt ${attempt} failed (${err?.message}); retrying…`);
+          await new Promise(res => setTimeout(res, 600));
+        }
+      }
+    }
+    if (!payload) {
+      console.error('[KGraph] /graph_extract fetch failed after retries:', lastErr);
       return;
     }
-    const payload = await r.json();
     console.log('[KGraph] received payload:', (payload.nodes || []).length, 'nodes,', (payload.edges || []).length, 'edges');
     if (payload.error) {
       console.error('[KGraph] backend reported error:', payload.error);
     }
     if (!payload.nodes?.length && !payload.edges?.length) {
       if (payload.error) {
-        console.warn('[KGraph] empty payload due to error above. Try a shorter question, or set OLLAMA_GRAPH_MODEL to a faster model.');
+        console.warn('[KGraph] empty payload due to error above.');
       } else {
         console.warn('[KGraph] empty payload — LLM produced no grounded entities/relations for this answer');
       }
@@ -556,8 +579,6 @@ async function _extractGraph(query, response, citations) {
       console.log('[KGraph] auto-opening panel — first content arrived');
       toggleGraphPanel();
     }
-  } catch (err) {
-    console.error('[KGraph] /graph_extract fetch failed:', err);
   } finally {
     _showGraphSpinner(false);
   }
