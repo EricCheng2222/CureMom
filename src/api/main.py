@@ -591,7 +591,9 @@ def query_stream(
 
 _jobs: dict[str, dict[str, Any]] = {}
 _jobs_lock = threading.Lock()
-_JOB_TTL_S = 600  # 10 min — long enough for slow Sonnet calls + a tab nap
+_JOB_TTL_S = 1200  # 20 min — bigger than the LLM + polling deadlines (both
+                   # 600 s) so a result that completes near the polling
+                   # deadline doesn't get GC'd before the last poll picks it up.
 
 
 def _gc_jobs() -> None:

@@ -222,10 +222,10 @@ def _llm_graph(
     Defaults to NIM (free tier) when no provider is specified.
 
     Tunable via env:
-      GRAPH_TIMEOUT_S — request timeout (default 120s)
+      GRAPH_TIMEOUT_S — request timeout (default 600s)
     """
     if timeout_s is None:
-        timeout_s = float(os.environ.get("GRAPH_TIMEOUT_S", "120"))
+        timeout_s = float(os.environ.get("GRAPH_TIMEOUT_S", "600"))
 
     user_msg = _build_user_message(query, answer)
     target = _resolve_provider(provider_spec)

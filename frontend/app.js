@@ -759,7 +759,7 @@ async function sendConsumerMessage() {
     const { job_id } = await start.json();
 
     // Poll the job, updating the typing-bubble stage on each tick.
-    const maxWaitMs = 300000;  // 5 min — generous for slow LLMs
+    const maxWaitMs = 600000;  // 10 min — matches graph deadline + LLM timeout
     const pollMs = 1500;
     const deadline = Date.now() + maxWaitMs;
     let lastStage = null;
@@ -1190,7 +1190,7 @@ function closeModal(e) {
 //   startUrl: POST → returns {job_id}
 //   jobUrlPrefix: GET ${jobUrlPrefix}/${job_id} → returns {status, payload?, error?}
 // Returns the final `payload` dict, throws on backend error or polling timeout.
-async function _runGraphJob({ startUrl, jobUrlPrefix, startBody, maxWaitMs = 180000, pollMs = 1500 }) {
+async function _runGraphJob({ startUrl, jobUrlPrefix, startBody, maxWaitMs = 600000, pollMs = 1500 }) {
   const r = await apiFetch(startUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
