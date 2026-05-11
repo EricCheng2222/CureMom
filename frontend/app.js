@@ -200,6 +200,7 @@ async function populateProviderDropdowns() {
       const haikuOpt = document.createElement('option');
       haikuOpt.value = 'claude/claude-haiku-4-5-20251001';
       haikuOpt.textContent = 'Claude Haiku 4.5 (fast)';
+      haikuOpt.dataset.isDefault = '1';
       sel.appendChild(haikuOpt);
 
       const sonnetOpt = document.createElement('option');
@@ -217,11 +218,11 @@ async function populateProviderDropdowns() {
       const opt = document.createElement('option');
       opt.value = 'nim';
       opt.textContent = `NVIDIA NIM (${nim.model})`;
-      opt.dataset.isDefault = '1';
       sel.appendChild(opt);
     }
 
-    // Default to NIM (free tier) if available, else Claude, else extractive.
+    // Default to Claude Haiku (fast + reliable + best citation discipline)
+    // if available, else first non-extractive option, else extractive.
     const def = [...sel.options].find(o => o.dataset.isDefault === '1');
     if (def) sel.value = def.value;
   }
