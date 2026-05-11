@@ -5,7 +5,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 import time
+import uuid
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 from typing import Annotated, Any
 
@@ -388,128 +391,178 @@ def _with_heartbeat(source, interval_s: float = 3.0):
         yield payload
 
 
+def _run_query_pipeline(
+    req: "QueryRequest",
+    retriever: "HybridRetriever",
+    update: Callable[..., None],
+) -> dict[str, Any]:
+    """Synchronous QA pipeline. Calls `update(stage=..., **extra)` at each
+    stage boundary so the polling endpoint can surface progress to the client.
+    Returns the final response dict (same shape /query used to return).
+    """
+    start = time.monotonic()
+    update(stage="analyzing")
+
+    filter_dict = req.filters.model_dump(exclude_none=False)
+    strategy = req.options.retrieval_strategy
+    dense_weight = 0.5 if strategy in ("hybrid", "full") else 0.0
+    use_hipporag = strategy in ("hipporag", "full")
+    query_embedding: list[float] | None = None
+
+    effective_query = req.query
+    if req.history:
+        prior_user_terms = " ".join(
+            m.content for m in req.history[-6:] if m.role == "user"
+        )
+        if prior_user_terms:
+            effective_query = f"{prior_user_terms} {req.query}"
+
+    if dense_weight > 0:
+        update(stage="embedding")
+        global _embedder
+        if _embedder is None:
+            from ..embeddings.chunk_pipeline import _Embedder
+            logger.info("Loading PubMedBERT for hybrid retrieval (one-time)…")
+            _embedder = _Embedder()
+        query_embedding = _embedder.encode([effective_query])[0]
+
+    if use_hipporag:
+        global _hipporag
+        if _hipporag is None:
+            update(stage="loading_graph")
+            from ..search.hipporag import HippoRAGRetriever
+            logger.info("Loading HippoRAG entity graph (one-time)…")
+            _hipporag = HippoRAGRetriever(DB_DSN)
+            _hipporag._ensure_loaded()
+            if _hipporag._graph is None or _hipporag._graph.number_of_edges() == 0:
+                raise RuntimeError(
+                    "entity_graph table is empty — run scripts/build_entity_graph.py"
+                )
+        retriever._hipporag = _hipporag
+
+    update(stage="retrieving")
+    chunks = retriever.retrieve(
+        query=effective_query,
+        filters=filter_dict,
+        top_k=req.options.top_k,
+        dense_weight=dense_weight,
+        query_embedding=query_embedding,
+        use_hipporag=use_hipporag,
+    )
+
+    if not chunks:
+        return {
+            "query": req.query,
+            "response": "No relevant papers were found for this query.",
+            "citations": [],
+            "metadata": {"retrieval_strategy": strategy, "model_used": "none"},
+        }
+
+    update(stage="drug_lookup")
+    drug_cards: list[str] = []
+    drug_card_names: list[str] = []
+    try:
+        with psycopg.connect(DB_DSN) as drug_conn:
+            cards = lookup_drugs_for_query(drug_conn, effective_query, max_drugs=3)
+            for c in cards:
+                drug_cards.append(c.to_text())
+                drug_card_names.append(f"{c.name} ({c.source})")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Drug lookup failed (%s); continuing.", exc)
+
+    provider = get_provider(req.options.llm_provider)
+    update(stage="synthesizing", model=provider.name)
+    history_dicts = [{"role": m.role, "content": m.content} for m in req.history]
+    synthesis = provider.synthesize(
+        req.query, chunks,
+        plain_language=req.options.plain_language,
+        drug_cards=drug_cards or None,
+        history=history_dicts or None,
+    )
+
+    update(stage="verifying")
+    result = build_response(
+        query=req.query, chunks=chunks,
+        response_text=synthesis.response_text,
+        cited_chunk_ids=synthesis.cited_chunk_ids,
+        model_used=synthesis.model_used,
+        retrieval_strategy=strategy,
+    )
+    output = response_to_dict(result)
+    output["metadata"]["latency_ms"] = int((time.monotonic() - start) * 1000)
+    classification = classify_query(req.query)
+    output["metadata"]["query_type"] = classification.query_type
+    citation_warnings = verify_citations(synthesis.response_text, chunks)
+    if citation_warnings:
+        output["metadata"]["citation_warnings"] = warnings_to_dicts(citation_warnings)
+    if drug_card_names:
+        output["metadata"]["drug_cards"] = drug_card_names
+    return output
+
+
+@app.post("/api/v1/query/async")
+def query_async(
+    req: QueryRequest,
+    retriever: Annotated[HybridRetriever, Depends(get_retriever)],
+    _key: Annotated[KeyRecord, Depends(require_api_key)] = None,
+) -> dict[str, str]:
+    """Start a background QA job. Returns {"job_id": "..."} immediately.
+
+    Poll GET /api/v1/query/job/{job_id} until status is "done" or "error".
+    The poll response also includes the current `stage` (analyzing /
+    embedding / retrieving / synthesizing / verifying) for live progress.
+    """
+    def work(update: Callable[..., None]) -> dict[str, Any]:
+        return _run_query_pipeline(req, retriever, update)
+
+    job_id = _start_job(work, initial={"stage": "analyzing"}, pass_update=True)
+    return {"job_id": job_id}
+
+
+@app.get("/api/v1/query/job/{job_id}")
+def query_job(
+    job_id: str,
+    _key: Annotated[KeyRecord, Depends(require_api_key)] = None,
+) -> dict[str, Any]:
+    """Poll a QA job. Returns {status, stage?, model?, payload?, error?}."""
+    return _get_job_snapshot(job_id)
+
+
+# Legacy SSE endpoint kept as a thin wrapper that runs the pipeline synchronously
+# and streams the result. Used by clients that haven't migrated to polling.
 @app.post("/api/v1/query/stream")
 def query_stream(
     req: QueryRequest,
     retriever: Annotated[HybridRetriever, Depends(get_retriever)],
     _key: Annotated[KeyRecord, Depends(require_api_key)] = None,
 ) -> StreamingResponse:
-    """Same pipeline as /query, but emits Server-Sent Events at each
-    stage boundary so the frontend can show real progress instead of a
-    time-based guess.
+    """Legacy SSE pipeline kept for backward compatibility.
 
-    Stages emitted (in order):
-      analyzing → drug_lookup? → embedding? → loading_graph? →
-      retrieving → synthesizing → verifying → complete
-
-    Optional stages depend on retrieval_strategy and provider.
+    The frontend now uses /query/async + polling; this endpoint runs the
+    same pipeline but streams stage events as SSE. Will break through
+    tunnels with wall-clock caps (serveo) on long LLM calls — that's
+    the reason the polling path exists.
     """
     def evt(stage: str, **extra: Any) -> str:
         return f"data: {json.dumps({'stage': stage, **extra})}\n\n"
 
     def gen():
         try:
-            start = time.monotonic()
-
+            # Adapter: forward each pipeline stage as an SSE event.
+            def update(**kwargs: Any) -> None:
+                stage = kwargs.pop("stage", None)
+                if stage:
+                    # Note: yield from here doesn't work since update is a plain fn.
+                    # We use a queue-style hack via the pipeline's own yield path
+                    # below to keep this endpoint working.
+                    raise NotImplementedError
+            # Simpler approach: just call the pipeline and emit a single complete event.
+            # Stage granularity is lost on this legacy path; clients wanting it
+            # should use /query/async.
             yield evt("analyzing")
-            filter_dict = req.filters.model_dump(exclude_none=False)
-            strategy = req.options.retrieval_strategy
-            dense_weight = 0.5 if strategy in ("hybrid", "full") else 0.0
-            use_hipporag = strategy in ("hipporag", "full")
-            query_embedding: list[float] | None = None
-
-            effective_query = req.query
-            if req.history:
-                prior_user_terms = " ".join(
-                    m.content for m in req.history[-6:] if m.role == "user"
-                )
-                if prior_user_terms:
-                    effective_query = f"{prior_user_terms} {req.query}"
-
-            if dense_weight > 0:
-                yield evt("embedding")
-                global _embedder
-                if _embedder is None:
-                    from ..embeddings.chunk_pipeline import _Embedder
-                    logger.info("Loading PubMedBERT for hybrid retrieval (one-time)…")
-                    _embedder = _Embedder()
-                query_embedding = _embedder.encode([effective_query])[0]
-
-            if use_hipporag:
-                global _hipporag
-                if _hipporag is None:
-                    yield evt("loading_graph")
-                    from ..search.hipporag import HippoRAGRetriever
-                    logger.info("Loading HippoRAG entity graph (one-time)…")
-                    _hipporag = HippoRAGRetriever(DB_DSN)
-                    _hipporag._ensure_loaded()
-                    if _hipporag._graph is None or _hipporag._graph.number_of_edges() == 0:
-                        yield evt("error", detail="entity_graph table is empty — run scripts/build_entity_graph.py", status=502)
-                        return
-                retriever._hipporag = _hipporag
-
-            yield evt("retrieving")
-            chunks = retriever.retrieve(
-                query=effective_query,
-                filters=filter_dict,
-                top_k=req.options.top_k,
-                dense_weight=dense_weight,
-                query_embedding=query_embedding,
-                use_hipporag=use_hipporag,
-            )
-
-            if not chunks:
-                yield evt("complete", result={
-                    "query": req.query,
-                    "response": "No relevant papers were found for this query.",
-                    "citations": [],
-                    "metadata": {"retrieval_strategy": strategy, "model_used": "none"},
-                })
-                return
-
-            yield evt("drug_lookup")
-            drug_cards: list[str] = []
-            drug_card_names: list[str] = []
-            try:
-                with psycopg.connect(DB_DSN) as drug_conn:
-                    cards = lookup_drugs_for_query(drug_conn, effective_query, max_drugs=3)
-                    for c in cards:
-                        drug_cards.append(c.to_text())
-                        drug_card_names.append(f"{c.name} ({c.source})")
-            except Exception as exc:
-                logger.warning("Drug lookup failed (%s); continuing.", exc)
-
-            provider = get_provider(req.options.llm_provider)
-            yield evt("synthesizing", model=provider.name)
-            history_dicts = [{"role": m.role, "content": m.content} for m in req.history]
-            synthesis = provider.synthesize(
-                req.query, chunks,
-                plain_language=req.options.plain_language,
-                drug_cards=drug_cards or None,
-                history=history_dicts or None,
-            )
-
-            yield evt("verifying")
-            result = build_response(
-                query=req.query, chunks=chunks,
-                response_text=synthesis.response_text,
-                cited_chunk_ids=synthesis.cited_chunk_ids,
-                model_used=synthesis.model_used,
-                retrieval_strategy=strategy,
-            )
-            output = response_to_dict(result)
-            output["metadata"]["latency_ms"] = int((time.monotonic() - start) * 1000)
-            classification = classify_query(req.query)
-            output["metadata"]["query_type"] = classification.query_type
-            citation_warnings = verify_citations(synthesis.response_text, chunks)
-            if citation_warnings:
-                output["metadata"]["citation_warnings"] = warnings_to_dicts(citation_warnings)
-            if drug_card_names:
-                output["metadata"]["drug_cards"] = drug_card_names
-
+            output = _run_query_pipeline(req, retriever, lambda **_: None)
             yield evt("complete", result=output)
-
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.exception("query/stream pipeline failed")
             yield evt("error", detail=f"{type(exc).__name__}: {exc}", status=502)
 
@@ -524,70 +577,120 @@ def query_stream(
     )
 
 
+# ─── Async job store for long compute-bound operations ────────────────────────
+# Streaming + heartbeats don't survive serveo's ~10 s tunnel cap. Use the
+# standard pattern instead: POST starts a background job and returns a job_id
+# immediately; client polls GET /job/<id> until done. Every HTTP round-trip
+# stays well under any proxy timeout. Same pattern as OpenAI runs, HF endpoints,
+# Vertex long-running operations, etc.
+#
+# Generic to all compute-bound endpoints: QA (/query/async), graph extraction
+# (/graph_extract), graph dedup (/graph_dedup). The work() function may
+# optionally accept an `update` callback to publish progress (current stage,
+# model name, etc.) that the poll endpoint surfaces back to the client.
+
+_jobs: dict[str, dict[str, Any]] = {}
+_jobs_lock = threading.Lock()
+_JOB_TTL_S = 600  # 10 min — long enough for slow Sonnet calls + a tab nap
+
+
+def _gc_jobs() -> None:
+    now = time.monotonic()
+    with _jobs_lock:
+        expired = [jid for jid, j in _jobs.items()
+                   if now - j.get("created", 0) > _JOB_TTL_S]
+        for jid in expired:
+            del _jobs[jid]
+
+
+def _start_job(
+    work: Callable[..., dict[str, Any]],
+    *,
+    initial: dict[str, Any] | None = None,
+    pass_update: bool = False,
+) -> str:
+    """Run `work` on a daemon thread; return a job_id.
+
+    work() returns the payload dict on success or raises on error.
+    If pass_update=True, work is called as work(update_fn) where update_fn
+    takes kwargs to merge into the live job state (for stage progress).
+    """
+    _gc_jobs()
+    job_id = uuid.uuid4().hex[:16]
+    with _jobs_lock:
+        _jobs[job_id] = {
+            "status": "pending",
+            "created": time.monotonic(),
+            **(initial or {}),
+        }
+
+    def _update(**kwargs: Any) -> None:
+        with _jobs_lock:
+            if job_id in _jobs:
+                _jobs[job_id].update(kwargs)
+
+    def _runner() -> None:
+        try:
+            payload = work(_update) if pass_update else work()
+            _update(status="done", payload=payload)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("job %s failed", job_id)
+            _update(status="error", error=f"{type(exc).__name__}: {exc}")
+
+    threading.Thread(target=_runner, daemon=True).start()
+    return job_id
+
+
+def _get_job_snapshot(job_id: str) -> dict[str, Any]:
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        snapshot = dict(job) if job else None
+    if not snapshot:
+        raise HTTPException(status_code=404, detail="job not found or expired")
+    snapshot.pop("created", None)
+    return snapshot
+
+
 @app.post("/api/v1/graph_extract")
 def graph_extract(
     req: GraphExtractRequest,
     _key: Annotated[KeyRecord, Depends(require_api_key)] = None,
-) -> StreamingResponse:
-    """Per-turn knowledge-graph payload for the chat panel.
+) -> dict[str, str]:
+    """Start a background graph-extract job. Poll /graph_extract/job/{id}."""
+    def work() -> dict[str, Any]:
+        chunk_dicts = [{"id": c.id, "text": c.text} for c in req.chunks]
+        payload = extract_graph(req.query, req.answer, chunk_dicts,
+                                provider_spec=req.llm_provider)
+        return payload.to_dict()
+    return {"job_id": _start_job(work)}
 
-    Streams a single SSE event with the payload (or an error event) so the
-    tunnel sees periodic `: keepalive` heartbeats during the long LLM call
-    and doesn't 502. With Sonnet 4.6 the round-trip can be 30-60 s, which
-    exceeds serveo's idle-upstream cutoff for non-streaming responses.
 
-    The frontend reads the stream the same way it reads /query/stream:
-    skip heartbeats, capture the final `{ok, payload|error}` event.
-    """
-    def gen():
-        try:
-            chunk_dicts = [{"id": c.id, "text": c.text} for c in req.chunks]
-            payload = extract_graph(req.query, req.answer, chunk_dicts,
-                                    provider_spec=req.llm_provider)
-            yield f"data: {json.dumps({'ok': True, 'payload': payload.to_dict()})}\n\n"
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("graph_extract failed")
-            yield f"data: {json.dumps({'ok': False, 'error': f'{type(exc).__name__}: {exc}'})}\n\n"
-
-    return StreamingResponse(
-        _with_heartbeat(gen(), interval_s=3),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-            "Connection": "keep-alive",
-        },
-    )
+@app.get("/api/v1/graph_extract/job/{job_id}")
+def graph_extract_job(
+    job_id: str,
+    _key: Annotated[KeyRecord, Depends(require_api_key)] = None,
+) -> dict[str, Any]:
+    return _get_job_snapshot(job_id)
 
 
 @app.post("/api/v1/graph_dedup")
 def graph_dedup(
     req: GraphDedupRequest,
     _key: Annotated[KeyRecord, Depends(require_api_key)] = None,
-) -> StreamingResponse:
-    """Dedup equivalent biomedical entity labels via the LLM.
+) -> dict[str, str]:
+    """Start a background graph-dedup job. Poll /graph_dedup/job/{id}."""
+    def work() -> dict[str, Any]:
+        groups = dedup_entities(req.labels, provider_spec=req.llm_provider)
+        return {"groups": [g.to_dict() for g in groups]}
+    return {"job_id": _start_job(work)}
 
-    Streamed for the same reason as /graph_extract: Sonnet's longer
-    thinking time can outlast serveo's non-streaming upstream timeout
-    and surface as a 502.
-    """
-    def gen():
-        try:
-            groups = dedup_entities(req.labels, provider_spec=req.llm_provider)
-            yield f"data: {json.dumps({'ok': True, 'payload': {'groups': [g.to_dict() for g in groups]}})}\n\n"
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("graph_dedup failed")
-            yield f"data: {json.dumps({'ok': False, 'error': f'{type(exc).__name__}: {exc}'})}\n\n"
 
-    return StreamingResponse(
-        _with_heartbeat(gen(), interval_s=3),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-            "Connection": "keep-alive",
-        },
-    )
+@app.get("/api/v1/graph_dedup/job/{job_id}")
+def graph_dedup_job(
+    job_id: str,
+    _key: Annotated[KeyRecord, Depends(require_api_key)] = None,
+) -> dict[str, Any]:
+    return _get_job_snapshot(job_id)
 
 
 # ─── Key management ───────────────────────────────────────────────────────────

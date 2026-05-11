@@ -463,16 +463,11 @@ async function _onMergeClick() {
   if (btn) { btn.disabled = true; btn.textContent = 'Merging…'; }
   console.log('[KGraph] POST /api/v1/graph_dedup with', labels.length, 'labels, provider:', provider);
   try {
-    const r = await apiFetch(`${API}/api/v1/graph_dedup`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
-      body: JSON.stringify({ labels, llm_provider: provider }),
+    const payload = await _runGraphJob({
+      startUrl: `${API}/api/v1/graph_dedup`,
+      jobUrlPrefix: `${API}/api/v1/graph_dedup/job`,
+      startBody: { labels, llm_provider: provider },
     });
-    if (!r.ok || !r.body) {
-      console.warn('[KGraph] /graph_dedup HTTP', r.status);
-      return;
-    }
-    const payload = await _readGraphSSE(r);
     if (!payload) return;
     const groups = payload.groups || [];
     console.log('[KGraph] received', groups.length, 'merge groups:', groups);
@@ -533,47 +528,21 @@ async function _extractGraph(query, response, citations) {
   console.log('[KGraph] POST /api/v1/graph_extract with', chunks.length, 'chunks, provider:', provider);
 
   if (_isGraphPanelOpen()) _showGraphSpinner(true);
-  // Three-tier attempt strategy:
-  //   1. user's chosen provider
-  //   2. retry on the same provider (transient blip)
-  //   3. fall back to Haiku (fast enough to fit under serveo's ~10s tunnel cap)
-  // Without #3, Sonnet picks structurally fail twice and the graph stays empty.
-  const FAST_FALLBACK = 'claude/claude-haiku-4-5-20251001';
-  const attempts = [provider, provider, FAST_FALLBACK];
+  // Run the LLM call as a background job, poll until done. Each HTTP
+  // round-trip is short and survives any tunnel cap. The job itself can
+  // run as long as the LLM needs (up to 180 s wall-clock).
   let payload = null;
   let lastErr = null;
   try {
-    for (let i = 0; i < attempts.length; i++) {
-      const tryProvider = attempts[i];
-      const isFallback = (i === attempts.length - 1 && tryProvider !== provider);
-      if (isFallback) {
-        console.warn('[KGraph] falling back to Haiku for graph extraction (faster, fits under tunnel cap)');
-        _refreshGraphChrome('Falling back to Haiku…');
-      }
-      try {
-        const r = await apiFetch(`${API}/api/v1/graph_extract`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
-          body: JSON.stringify({ query, answer: cleanAnswer, chunks, llm_provider: tryProvider }),
-        });
-        if (!r.ok || !r.body) {
-          if (r.status >= 500 && i < attempts.length - 1) {
-            console.warn(`[KGraph] graph_extract HTTP ${r.status}; trying next provider…`);
-            await new Promise(res => setTimeout(res, 600));
-            continue;
-          }
-          console.warn('[KGraph] /graph_extract HTTP', r.status);
-          return;
-        }
-        payload = await _readGraphSSE(r);
-        break;
-      } catch (err) {
-        lastErr = err;
-        if (i < attempts.length - 1) {
-          console.warn(`[KGraph] attempt ${i + 1} failed (${err?.message}); retrying…`);
-          await new Promise(res => setTimeout(res, 600));
-        }
-      }
+    try {
+      payload = await _runGraphJob({
+        startUrl: `${API}/api/v1/graph_extract`,
+        jobUrlPrefix: `${API}/api/v1/graph_extract/job`,
+        startBody: { query, answer: cleanAnswer, chunks, llm_provider: provider },
+      });
+    } catch (err) {
+      lastErr = err;
+      console.error('[KGraph] graph_extract job failed:', err?.message);
     }
     if (!payload) {
       console.error('[KGraph] /graph_extract fetch failed after retries:', lastErr);
@@ -773,139 +742,76 @@ async function sendConsumerMessage() {
     history: chatHistory.slice(-MAX_HISTORY_TURNS * 2),  // last N user+assistant pairs
   });
 
-  // Retry once on transport-level failure (Safari "Load failed" / connection
-  // dropped mid-stream). HTTP error responses and pipeline error events are
-  // terminal — we don't retry those. If both stream attempts fail, fall back
-  // to the non-streaming /query endpoint (single POST → single JSON response,
-  // which survives the same network paths that kill long-lived HTTP/2 streams
-  // on some iOS-Safari + middlebox combos).
-  const MAX_STREAM_ATTEMPTS = 2;
-  let lastErr = null;
+  // Start a background QA job and poll for progress. Each HTTP round-trip
+  // stays well under any tunnel cap; the LLM can take as long as it needs.
   try {
-    for (let attempt = 1; attempt <= MAX_STREAM_ATTEMPTS; attempt++) {
-      try {
-        await _runQueryStream(typing, reqBody, query);
-        return;  // success or terminal-but-not-thrown (HTTP error, error event)
-      } catch (err) {
-        lastErr = err;
-        if (attempt < MAX_STREAM_ATTEMPTS) {
-          console.warn(`[query/stream] attempt ${attempt} failed (${err?.message}); retrying…`);
-          await new Promise(res => setTimeout(res, 600));
-        }
-      }
-    }
-    // Both stream attempts failed. Fall back to the non-streaming endpoint.
-    console.warn('[query] stream failed twice, falling back to /api/v1/query');
-    _setTypingStage(typing, { stage: 'fallback' });
-    try {
-      await _runQueryNonStreaming(typing, reqBody, query);
+    const start = await apiFetch(`${API}/api/v1/query/async`, {
+      method: 'POST',
+      body: reqBody,
+    });
+    if (!start.ok) {
+      removeTypingBubble(typing);
+      const err = await start.json().catch(() => ({}));
+      appendAIBubble(`Sorry, I couldn't get a response. ${_formatErr(err, start)}`, []);
+      btn.disabled = false;
       return;
-    } catch (err) {
-      lastErr = err;
-      console.error('[query] non-streaming fallback also failed:', err);
     }
-    // Both paths exhausted.
+    const { job_id } = await start.json();
+
+    // Poll the job, updating the typing-bubble stage on each tick.
+    const maxWaitMs = 300000;  // 5 min — generous for slow LLMs
+    const pollMs = 1500;
+    const deadline = Date.now() + maxWaitMs;
+    let lastStage = null;
+    let finalPayload = null;
+    let finalErr = null;
+    while (Date.now() < deadline) {
+      await new Promise(res => setTimeout(res, pollMs));
+      let pr;
+      try {
+        pr = await apiFetch(`${API}/api/v1/query/job/${encodeURIComponent(job_id)}`);
+      } catch {
+        // Transient network blip — keep polling.
+        continue;
+      }
+      if (!pr.ok) {
+        if (pr.status === 404) { finalErr = new Error('job expired or unknown'); break; }
+        continue;  // transient 5xx
+      }
+      const job = await pr.json().catch(() => null);
+      if (!job) continue;
+      if (job.stage && job.stage !== lastStage) {
+        lastStage = job.stage;
+        _setTypingStage(typing, { stage: job.stage, model: job.model });
+      }
+      if (job.status === 'done') { finalPayload = job.payload; break; }
+      if (job.status === 'error') { finalErr = new Error(job.error || 'pipeline error'); break; }
+    }
+
     removeTypingBubble(typing);
-    const detail = lastErr?.message || String(lastErr);
-    appendSystemErrorBubble('Could not reach the API. ' + detail);
+    if (finalErr) {
+      appendAIBubble(`Sorry, I couldn't get a response. ${finalErr.message}`, []);
+      console.error('[query] job failed:', finalErr);
+      btn.disabled = false;
+      return;
+    }
+    if (!finalPayload) {
+      appendSystemErrorBubble('Timed out waiting for the answer.');
+      btn.disabled = false;
+      return;
+    }
+    const response = finalPayload.response ?? 'No response returned.';
+    appendAIBubble(response, finalPayload.citations ?? []);
+    _refreshAuthState();
+    pushAssistantToHistory(response);
+    _extractGraph(query, response, finalPayload.citations ?? []);
+  } catch (err) {
+    removeTypingBubble(typing);
+    console.error('[query] failed:', err);
+    appendSystemErrorBubble('Could not reach the API. ' + (err?.message || err));
   } finally {
     btn.disabled = false;
   }
-}
-
-// Non-streaming fallback for /query. Used when /query/stream fails twice in
-// a row — typically because iOS Safari + the user's middlebox can't keep a
-// long HTTP/2 stream open. The response shape is identical to the SSE
-// "complete" event's `result` field, so downstream handling stays the same.
-async function _runQueryNonStreaming(typing, reqBody, query) {
-  const r = await apiFetch(`${API}/api/v1/query`, {
-    method: 'POST',
-    body: reqBody,
-  });
-  if (!r.ok) {
-    removeTypingBubble(typing);
-    const err = await r.json().catch(() => ({}));
-    appendAIBubble(`Sorry, I couldn't get a response. ${_formatErr(err, r)}`, []);
-    console.error('[query] HTTP', r.status, err);
-    return;
-  }
-  const data = await r.json();
-  removeTypingBubble(typing);
-  const response = data.response ?? 'No response returned.';
-  appendAIBubble(response, data.citations ?? []);
-  _refreshAuthState();
-  pushAssistantToHistory(response);
-  _extractGraph(query, response, data.citations ?? []);
-}
-
-// One attempt at running the stream. Returns normally on success OR on a
-// terminal non-retryable outcome (HTTP error / error stage event). Throws
-// on transport-level failures so the caller can retry.
-async function _runQueryStream(typing, reqBody, query) {
-  const r = await apiFetch(`${API}/api/v1/query/stream`, {
-    method: 'POST',
-    headers: { 'Accept': 'text/event-stream' },
-    body: reqBody,
-  });
-
-  if (!r.ok || !r.body) {
-    removeTypingBubble(typing);
-    const err = await r.json().catch(() => ({}));
-    appendAIBubble(`Sorry, I couldn't get a response. ${_formatErr(err, r)}`, []);
-    console.error('[query] HTTP', r.status, err);
-    return;  // terminal — caller should not retry
-  }
-
-  // Stream SSE events. Each event payload looks like:
-  //   data: {"stage": "<name>", ...}\n\n
-  // We update the typing-bubble label as stages arrive; the final
-  // 'complete' event carries the full result payload.
-  const reader = r.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-  let data = null;
-  let errEvent = null;
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const events = buffer.split('\n\n');
-    buffer = events.pop() || '';
-    for (const raw of events) {
-      const line = raw.split('\n').find(l => l.startsWith('data: '));
-      if (!line) continue;
-      let obj;
-      try { obj = JSON.parse(line.slice(6)); } catch { continue; }
-      if (obj.stage === 'complete') {
-        data = obj.result;
-      } else if (obj.stage === 'error') {
-        errEvent = obj;
-      } else if (obj.stage === 'keepalive') {
-        // heartbeat — keeps the tunnel alive, no UI update
-      } else {
-        _setTypingStage(typing, obj);
-      }
-    }
-  }
-
-  removeTypingBubble(typing);
-
-  if (errEvent) {
-    appendAIBubble(`Sorry, I couldn't get a response. ${errEvent.detail || 'unknown error'}`, []);
-    console.error('[query/stream] error event:', errEvent);
-    return;
-  }
-  if (!data) {
-    // Stream ended cleanly but no complete event — ambiguous, treat as terminal
-    appendAIBubble('No response returned (stream ended without a complete event).', []);
-    return;
-  }
-  const response = data.response ?? 'No response returned.';
-  appendAIBubble(response, data.citations ?? []);
-  _refreshAuthState();
-  pushAssistantToHistory(response);
-  _extractGraph(query, response, data.citations ?? []);
 }
 
 function appendUserBubble(text) {
@@ -1279,36 +1185,44 @@ function closeModal(e) {
 // event, with `: keepalive` comments in between. Used by /graph_extract and
 // /graph_dedup. Returns the payload on success, throws on backend error,
 // returns null if the stream ends without a final event.
-async function _readGraphSSE(response) {
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buf = '';
-  let sawKeepalive = false;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
-    const events = buf.split('\n\n');
-    buf = events.pop() || '';
-    for (const raw of events) {
-      const line = raw.split('\n').find(l => l.startsWith('data: '));
-      if (!line) continue;
-      let obj;
-      try { obj = JSON.parse(line.slice(6)); } catch { continue; }
-      if (obj.stage === 'keepalive') { sawKeepalive = true; continue; }
-      if (obj.ok === true) return obj.payload;
-      if (obj.ok === false) throw new Error(obj.error || 'graph backend error');
-    }
+// Start a long-running graph job and poll until done. Each HTTP round-trip
+// stays well under any tunnel cap, so the LLM can run as long as it needs.
+//   startUrl: POST → returns {job_id}
+//   jobUrlPrefix: GET ${jobUrlPrefix}/${job_id} → returns {status, payload?, error?}
+// Returns the final `payload` dict, throws on backend error or polling timeout.
+async function _runGraphJob({ startUrl, jobUrlPrefix, startBody, maxWaitMs = 180000, pollMs = 1500 }) {
+  const r = await apiFetch(startUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(startBody),
+  });
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({}));
+    throw new Error(`start failed: HTTP ${r.status} ${err.detail || ''}`);
   }
-  // Stream ended with no final ok/error event. Almost always a tunnel
-  // wall-clock cutoff — the LLM is still running upstream but the proxy
-  // killed the response after N seconds of activity. Throw so the caller
-  // treats it as retryable.
-  throw new Error(
-    sawKeepalive
-      ? 'stream ended without final event (tunnel timeout during LLM call)'
-      : 'stream ended without any event'
-  );
+  const { job_id } = await r.json();
+  if (!job_id) throw new Error('start response missing job_id');
+
+  const deadline = Date.now() + maxWaitMs;
+  while (Date.now() < deadline) {
+    await new Promise(res => setTimeout(res, pollMs));
+    let pr;
+    try {
+      pr = await apiFetch(`${jobUrlPrefix}/${encodeURIComponent(job_id)}`);
+    } catch (e) {
+      // Transient network blip — keep polling.
+      continue;
+    }
+    if (!pr.ok) {
+      if (pr.status === 404) throw new Error('job expired or unknown');
+      continue;  // transient 5xx — keep polling
+    }
+    const status = await pr.json().catch(() => ({}));
+    if (status.status === 'done') return status.payload;
+    if (status.status === 'error') throw new Error(status.error || 'graph job failed');
+    // status === 'pending' → keep polling
+  }
+  throw new Error(`graph job timed out after ${Math.round(maxWaitMs / 1000)}s polling`);
 }
 
 // ── Utilities ────────────────────────────────────────────────────────────────
