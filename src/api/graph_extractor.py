@@ -351,8 +351,16 @@ def _parse_graph(raw: str) -> dict[str, Any]:
         return empty
     try:
         obj = json.loads(m.group(0))
+        truncated = False
     except json.JSONDecodeError:
-        return empty
+        # The full JSON didn't parse — typically because max_tokens cut it
+        # mid-relation. Try to salvage as many complete relation objects
+        # as possible so we still build a partial graph.
+        partial = _recover_partial_relations(raw)
+        if partial is None:
+            return empty
+        obj = partial
+        truncated = True
     rels = obj.get("relations") if isinstance(obj.get("relations"), list) else []
     raw_types = obj.get("types") if isinstance(obj.get("types"), dict) else {}
     # Lowercase keys + clamp values to the allowed set.
@@ -362,7 +370,69 @@ def _parse_graph(raw: str) -> dict[str, Any]:
             continue
         t_up = t.strip().upper()
         types[label.strip().lower()] = t_up if t_up in _VALID_TYPES else "OTHER"
-    return {"relations": rels, "types": types, "_raw": raw}
+    out: dict[str, Any] = {"relations": rels, "types": types, "_raw": raw}
+    if truncated:
+        out["_truncated"] = True
+    return out
+
+
+_RELATIONS_RE = re.compile(r'"relations"\s*:\s*\[')
+
+
+def _recover_partial_relations(raw: str) -> dict[str, Any] | None:
+    """Salvage complete relation objects from a truncated JSON string.
+
+    Walks through the bytes after `"relations":[` tracking brace depth +
+    string state. Each time depth returns to 0 we have one complete
+    top-level object — try to json.loads it individually. Stop when we
+    hit `]` (clean end of array) or run out of input (truncation).
+
+    Returns {"relations": [...], "types": {}} on success, None if we
+    can't find the `relations` array at all or nothing parses cleanly.
+    """
+    m = _RELATIONS_RE.search(raw)
+    if not m:
+        return None
+    i = m.end()
+    objects: list[str] = []
+    depth = 0
+    obj_start = -1
+    in_string = False
+    escape = False
+    while i < len(raw):
+        c = raw[i]
+        if escape:
+            escape = False
+        elif in_string:
+            if c == "\\":
+                escape = True
+            elif c == '"':
+                in_string = False
+        elif c == '"':
+            in_string = True
+        elif c == "{":
+            if depth == 0:
+                obj_start = i
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0 and obj_start >= 0:
+                objects.append(raw[obj_start:i + 1])
+                obj_start = -1
+        elif c == "]" and depth == 0:
+            break  # Clean end of relations array
+        i += 1
+
+    rels = []
+    for s in objects:
+        try:
+            rels.append(json.loads(s))
+        except json.JSONDecodeError:
+            # One bad object doesn't poison the rest — skip and continue.
+            continue
+    if not rels:
+        return None
+    return {"relations": rels, "types": {}}
 
 
 # ─── Filter & assemble ───────────────────────────────────────────────────────
@@ -573,6 +643,12 @@ def extract_graph(
     raw_relations = graph_obj.get("relations", [])
     raw_types = graph_obj.get("types", {}) or {}
     raw_dump = graph_obj.get("_raw", "") or ""
+    truncated = bool(graph_obj.get("_truncated"))
+    if truncated:
+        logger.warning(
+            "graph_extract: LLM output truncated — salvaged %d relations from partial JSON",
+            len(raw_relations),
+        )
 
     # Each unique subject/object string in the relations becomes a node.
     # Grounding: the label must appear (case-insensitively) as a substring
@@ -631,6 +707,14 @@ def extract_graph(
         diag = (
             f"{cause}. Stages: {stage_counts}. "
             f"Raw LLM head: {raw_dump[:300]}"
+        )
+    elif truncated:
+        # Partial graph — answer was longer than the LLM cap. Surface the
+        # truncation so the frontend can show a warning instead of pretending
+        # this is a complete graph.
+        diag = (
+            f"truncated: LLM output exceeded max_tokens; built graph from "
+            f"{len(raw_relations)} salvaged relations (graph may be incomplete)"
         )
 
     return GraphPayload(nodes=kept_nodes, edges=edges, error=diag)

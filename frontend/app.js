@@ -195,12 +195,11 @@ async function populateProviderDropdowns() {
 
     if (claude.available) {
       // Two Claude variants via the backend's `claude/<model>` override:
-      // Haiku is the fast/cheap default; Sonnet is the higher-quality option
+      // Haiku is the fast/cheap option; Sonnet is the higher-quality option
       // for richer synthesis (used when the user wants better graph extraction).
       const haikuOpt = document.createElement('option');
       haikuOpt.value = 'claude/claude-haiku-4-5-20251001';
       haikuOpt.textContent = 'Claude Haiku 4.5 (fast)';
-      haikuOpt.dataset.isDefault = '1';
       sel.appendChild(haikuOpt);
 
       const sonnetOpt = document.createElement('option');
@@ -218,11 +217,12 @@ async function populateProviderDropdowns() {
       const opt = document.createElement('option');
       opt.value = 'nim';
       opt.textContent = `NVIDIA NIM (${nim.model})`;
+      opt.dataset.isDefault = '1';
       sel.appendChild(opt);
     }
 
-    // Default to Claude Haiku (fast + reliable + best citation discipline)
-    // if available, else first non-extractive option, else extractive.
+    // Default to NIM (free tier) if available, else first non-extractive
+    // option, else extractive.
     const def = [...sel.options].find(o => o.dataset.isDefault === '1');
     if (def) sel.value = def.value;
   }
@@ -563,7 +563,15 @@ async function _extractGraph(query, response, citations) {
     }
     const result = KGraph.merge(payload);
     console.log('[KGraph] merged —', result.addedNodes.length, 'new nodes,', result.addedEdges.length, 'new edges');
-    _refreshGraphChrome();
+    // Truncated payload: graph built from a partial LLM response. Surface
+    // a brief warning in the graph chrome so the user knows the panel may
+    // be missing relations from the tail of the answer.
+    if (payload.error && payload.error.startsWith('truncated')) {
+      _refreshGraphChrome('Graph partial — answer was truncated (raise max_tokens or shorten the question)');
+      setTimeout(() => _refreshGraphChrome(), 8000);
+    } else {
+      _refreshGraphChrome();
+    }
     // If the panel is collapsed but we have new content, gently nudge it open
     // so the user sees the result.
     if (!_isGraphPanelOpen() && (result.addedNodes.length || result.addedEdges.length)) {

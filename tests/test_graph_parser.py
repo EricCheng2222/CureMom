@@ -28,14 +28,31 @@ def test_parses_json_inside_markdown_fence():
 
 
 def test_truncated_json_mid_relation_returns_empty():
-    """If max_tokens hits mid-output, JSON is invalid (no closing brace).
-    Parser must NOT raise; must return the empty fallback shape so the
-    pipeline reports an empty graph instead of crashing the job."""
+    """Truncation BEFORE any relation completes: nothing to salvage,
+    return empty. Parser must NOT raise."""
     raw = '{"relations":[{"subject":"C1q","predicate":"binds","object":"PS","citation'
     out = _parse_graph(raw)
-    assert out["relations"] == [], "truncated JSON should fall back to empty relations"
+    assert out["relations"] == [], "truncated JSON with no complete relation → empty"
     assert out["types"] == {}
     assert out["_raw"] == raw, "raw text preserved for debugging"
+
+
+def test_truncated_after_complete_relations_salvages_them():
+    """Truncation AFTER some complete relations: the parser walks the
+    relations array, collects every complete `{...}`, and uses them.
+    Marks the result `_truncated` so the caller can surface a warning."""
+    # Two complete relations, then a partial one that gets cut.
+    raw = (
+        '{"relations":['
+        '{"subject":"C1q","predicate":"binds","object":"apoptotic cells","citations":[1]},'
+        '{"subject":"C1q","predicate":"activates","object":"classical complement pathway","citations":[2]},'
+        '{"subject":"phagocytes","predicate":"clear","obj'
+    )
+    out = _parse_graph(raw)
+    assert len(out["relations"]) == 2, "should salvage the two complete relations"
+    assert out["relations"][0]["subject"] == "C1q"
+    assert out["relations"][1]["object"] == "classical complement pathway"
+    assert out.get("_truncated") is True, "truncation flag must be set so caller can warn"
 
 
 def test_truncated_json_mid_types_returns_empty():
