@@ -1277,6 +1277,7 @@ async function _readGraphSSE(response) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buf = '';
+  let sawKeepalive = false;
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -1288,12 +1289,20 @@ async function _readGraphSSE(response) {
       if (!line) continue;
       let obj;
       try { obj = JSON.parse(line.slice(6)); } catch { continue; }
-      if (obj.stage === 'keepalive') continue;  // heartbeat ping, ignore
+      if (obj.stage === 'keepalive') { sawKeepalive = true; continue; }
       if (obj.ok === true) return obj.payload;
       if (obj.ok === false) throw new Error(obj.error || 'graph backend error');
     }
   }
-  return null;
+  // Stream ended with no final ok/error event. Almost always a tunnel
+  // wall-clock cutoff — the LLM is still running upstream but the proxy
+  // killed the response after N seconds of activity. Throw so the caller
+  // treats it as retryable.
+  throw new Error(
+    sawKeepalive
+      ? 'stream ended without final event (tunnel timeout during LLM call)'
+      : 'stream ended without any event'
+  );
 }
 
 // ── Utilities ────────────────────────────────────────────────────────────────
