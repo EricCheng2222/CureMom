@@ -533,26 +533,32 @@ async function _extractGraph(query, response, citations) {
   console.log('[KGraph] POST /api/v1/graph_extract with', chunks.length, 'chunks, provider:', provider);
 
   if (_isGraphPanelOpen()) _showGraphSpinner(true);
-  // Retry transport-level failures once. The LLM call is 10-20 s and the
-  // tunnel sometimes drops the connection mid-flight, which surfaces as
-  // a thrown TypeError; without retry the graph silently stays stale —
-  // which is why re-submitting the same query has been making nodes appear.
-  // HTTP error responses (4xx/5xx) and empty payloads are terminal.
-  const MAX_ATTEMPTS = 2;
+  // Three-tier attempt strategy:
+  //   1. user's chosen provider
+  //   2. retry on the same provider (transient blip)
+  //   3. fall back to Haiku (fast enough to fit under serveo's ~10s tunnel cap)
+  // Without #3, Sonnet picks structurally fail twice and the graph stays empty.
+  const FAST_FALLBACK = 'claude/claude-haiku-4-5-20251001';
+  const attempts = [provider, provider, FAST_FALLBACK];
   let payload = null;
   let lastErr = null;
   try {
-    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    for (let i = 0; i < attempts.length; i++) {
+      const tryProvider = attempts[i];
+      const isFallback = (i === attempts.length - 1 && tryProvider !== provider);
+      if (isFallback) {
+        console.warn('[KGraph] falling back to Haiku for graph extraction (faster, fits under tunnel cap)');
+        _refreshGraphChrome('Falling back to Haiku…');
+      }
       try {
         const r = await apiFetch(`${API}/api/v1/graph_extract`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
-          body: JSON.stringify({ query, answer: cleanAnswer, chunks, llm_provider: provider }),
+          body: JSON.stringify({ query, answer: cleanAnswer, chunks, llm_provider: tryProvider }),
         });
         if (!r.ok || !r.body) {
-          // 5xx are usually tunnel hiccups — worth a retry. 4xx are terminal.
-          if (r.status >= 500 && attempt < MAX_ATTEMPTS) {
-            console.warn(`[KGraph] graph_extract HTTP ${r.status}; retrying…`);
+          if (r.status >= 500 && i < attempts.length - 1) {
+            console.warn(`[KGraph] graph_extract HTTP ${r.status}; trying next provider…`);
             await new Promise(res => setTimeout(res, 600));
             continue;
           }
@@ -563,8 +569,8 @@ async function _extractGraph(query, response, citations) {
         break;
       } catch (err) {
         lastErr = err;
-        if (attempt < MAX_ATTEMPTS) {
-          console.warn(`[KGraph] graph_extract attempt ${attempt} failed (${err?.message}); retrying…`);
+        if (i < attempts.length - 1) {
+          console.warn(`[KGraph] attempt ${i + 1} failed (${err?.message}); retrying…`);
           await new Promise(res => setTimeout(res, 600));
         }
       }
