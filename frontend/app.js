@@ -468,6 +468,7 @@ async function _onMergeClick() {
       startUrl: `${API}/api/v1/graph_dedup`,
       jobUrlPrefix: `${API}/api/v1/graph_dedup/job`,
       startBody: { labels, llm_provider: provider },
+      pollMs: 750,  // tighter cadence — dedup output is short, don't waste a 1.5 s tail
     });
     if (!payload) return;
     const groups = payload.groups || [];
