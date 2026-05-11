@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -210,13 +211,23 @@ def _parse_grants(article: etree._Element) -> list[str]:
     return list(set(agencies))
 
 
+_PMID_RE = re.compile(r"^\d{1,20}$")
+_PMCID_RE = re.compile(r"^PMC\d{1,16}$")
+
+
 def _parse_references(pubmed_article: etree._Element) -> list[str]:
-    """Extract cited PMIDs from the ReferenceList."""
+    """Extract cited PMIDs from the ReferenceList.
+
+    PubMed occasionally publishes broken references where
+    `<ArticleId IdType="pubmed">` contains the full citation prose instead
+    of a numeric PMID (seen in real data, e.g. PMID 32323293's references).
+    Validate: digit-only, ≤20 chars (the cited_pmid_raw column width).
+    """
     pmids: list[str] = []
     for ref in pubmed_article.findall(".//ReferenceList/Reference"):
         for art_id in ref.findall(".//ArticleIdList/ArticleId[@IdType='pubmed']"):
             pmid = _text(art_id).strip()
-            if pmid:
+            if pmid and _PMID_RE.match(pmid):
                 pmids.append(pmid)
     return pmids
 
@@ -256,16 +267,24 @@ def parse_pubmed_article(article_xml_bytes: bytes) -> ParsedPaper | None:
         return None
     pmid = _text(pmid_el).strip()
 
-    # IDs
+    # IDs. NOTE: `.//PubmedData/ArticleIdList/ArticleId` is a descendant
+    # query — it matches BOTH the article's own ArticleIdList AND any
+    # nested ones (e.g. inside reference entries). For pmc/doi we only
+    # want the article's OWN IDs, so we scope to the direct ArticleIdList
+    # child of PubmedData. Also validate format defensively: PubMed
+    # occasionally publishes references with the full citation prose
+    # stuffed into an ArticleId element (see _parse_references comment).
     pmcid = None
     doi = _parse_elocation(article)
-    for art_id in article_el.findall(".//PubmedData/ArticleIdList/ArticleId"):
-        id_type = art_id.get("IdType", "")
-        val = _text(art_id).strip()
-        if id_type == "pmc":
-            pmcid = val
-        elif id_type == "doi" and doi is None:
-            doi = val
+    own_id_list = article_el.find("PubmedData/ArticleIdList")
+    if own_id_list is not None:
+        for art_id in own_id_list.findall("ArticleId"):
+            id_type = art_id.get("IdType", "")
+            val = _text(art_id).strip()
+            if id_type == "pmc" and _PMCID_RE.match(val):
+                pmcid = val
+            elif id_type == "doi" and doi is None and len(val) <= 255:
+                doi = val
 
     # Title
     title_el = article.find(".//ArticleTitle")
