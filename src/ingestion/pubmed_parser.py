@@ -150,14 +150,19 @@ def _parse_authors(article: etree._Element) -> list[ParsedAuthor]:
             for aff in author_el.findall(".//AffiliationInfo")
         ]
         orcid_ids = [
-            _text(idf)
+            _clean_orcid(_text(idf))
             for idf in author_el.findall(".//Identifier[@Source='ORCID']")
         ]
+        orcid_ids = [o for o in orcid_ids if o]
+
+        initials = _find_text(author_el, "Initials")
+        if initials and len(initials) > 20:
+            initials = initials[:20]   # authors.initials is varchar(20)
 
         authors.append(ParsedAuthor(
             last_name=_find_text(author_el, "LastName"),
             fore_name=_find_text(author_el, "ForeName"),
-            initials=_find_text(author_el, "Initials"),
+            initials=initials,
             orcid=orcid_ids[0] if orcid_ids else None,
             affiliations=[a for a in affiliations if a],
         ))
@@ -213,6 +218,27 @@ def _parse_grants(article: etree._Element) -> list[str]:
 
 _PMID_RE = re.compile(r"^\d{1,20}$")
 _PMCID_RE = re.compile(r"^PMC\d{1,16}$")
+# Canonical ORCID: 16 digits in 4 groups of 4 separated by hyphens, optional
+# https://orcid.org/ prefix. Total ≤30 chars to fit the column. PubMed
+# occasionally publishes records with two ORCIDs concatenated without a
+# separator (seen on PMID 36107612 etc.) — those exceed 30 chars and break
+# the upsert. Strip prefix + validate.
+_ORCID_RE = re.compile(r"^\d{4}-\d{4}-\d{4}-\d{3}[\dXx]$")
+
+
+def _clean_orcid(raw: str | None) -> str | None:
+    """Strip optional URL prefix; return None if the residue isn't a valid
+    ORCID. Rejects PubMed's occasional double-ORCID concatenations."""
+    if not raw:
+        return None
+    s = raw.strip()
+    for prefix in ("https://orcid.org/", "http://orcid.org/", "orcid.org/"):
+        if s.startswith(prefix):
+            s = s[len(prefix):]
+            break
+    if _ORCID_RE.match(s):
+        return s
+    return None
 
 
 def _parse_references(pubmed_article: etree._Element) -> list[str]:
