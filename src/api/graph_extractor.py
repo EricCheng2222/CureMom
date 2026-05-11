@@ -252,7 +252,7 @@ def _claude_graph(user_msg: str, timeout_s: float) -> dict[str, Any]:
     client = anthropic.Anthropic(api_key=api_key, timeout=timeout_s)
     msg = client.messages.create(
         model=model,
-        max_tokens=4096,
+        max_tokens=32768,
         system=_GRAPH_PROMPT,
         messages=[{"role": "user", "content": user_msg}],
     )
@@ -312,7 +312,7 @@ def _nim_graph(user_msg: str, provider_spec: str | None, timeout_s: float) -> di
             {"role": "user", "content": user_msg},
         ],
         temperature=0.0,
-        max_tokens=4096,
+        max_tokens=32768,
     )
     raw = resp.choices[0].message.content or ""
     return _parse_graph(raw)

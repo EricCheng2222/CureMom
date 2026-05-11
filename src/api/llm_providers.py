@@ -261,7 +261,7 @@ class ClaudeProvider(LLMProvider):
         self,
         api_key: str | None = None,
         model: str = "claude-sonnet-4-6",
-        max_tokens: int = 1024,
+        max_tokens: int = 32768,
         timeout_s: float = 120.0,
     ) -> None:
         self._api_key = api_key or os.environ["ANTHROPIC_API_KEY"]
@@ -332,7 +332,7 @@ class OpenAIProvider(LLMProvider):
         self,
         api_key: str | None = None,
         model: str = "gpt-4o",
-        max_tokens: int = 1024,
+        max_tokens: int = 32768,
         timeout_s: float = 120.0,
     ) -> None:
         self._api_key = api_key or os.environ["OPENAI_API_KEY"]
@@ -391,7 +391,7 @@ class NIMProvider(LLMProvider):
         self,
         api_key: str | None = None,
         model: str = "minimaxai/minimax-m2.7",
-        max_tokens: int = 1024,
+        max_tokens: int = 32768,
         base_url: str = "https://integrate.api.nvidia.com/v1",
         timeout_s: float = 120.0,
     ) -> None:

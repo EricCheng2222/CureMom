@@ -139,7 +139,7 @@ def _claude_dedup(user_msg: str, timeout_s: float) -> str:
     client = anthropic.Anthropic(api_key=api_key, timeout=timeout_s)
     msg = client.messages.create(
         model=model,
-        max_tokens=2048,
+        max_tokens=32768,
         system=_DEDUP_PROMPT,
         messages=[{"role": "user", "content": user_msg}],
     )
@@ -189,7 +189,7 @@ def _nim_dedup(user_msg: str, provider_spec: str | None, timeout_s: float) -> st
             {"role": "user", "content": user_msg},
         ],
         temperature=0.0,
-        max_tokens=2048,
+        max_tokens=32768,
     )
     return resp.choices[0].message.content or ""
 
