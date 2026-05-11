@@ -379,9 +379,10 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); }
 
 /* ═══════════════════════════════════════════════════════ CHAT AREA ══════ */
 .chat-area {
-  /* favor the chat 2:1 over the graph; min-width:0 allows shrinking
-     past intrinsic widths so message bubbles can wrap on narrow laptops */
-  flex: 2 1 520px;
+  /* 50/50 split with the graph panel — equal flex weights, both
+     basis=0 so they share remaining space evenly. min-width:0 lets
+     bubbles wrap below their intrinsic width on small viewports. */
+  flex: 1 1 0;
   min-width: 0;
   display: flex;
   flex-direction: column;
@@ -976,12 +977,11 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); }
 
 /* ═══════════════════════════════════════════════ KNOWLEDGE GRAPH PANEL ══ */
 .graph-panel {
-  /* Fluid width that scales with viewport — bottoms out at 360px so the
-     graph stays usable, tops out at 600px so the chat keeps real estate
-     on a 13" laptop. Between the two, ~38vw is comfortable. */
-  flex: 1 1 clamp(360px, 38vw, 600px);
-  min-width: 360px;
-  max-width: clamp(360px, 38vw, 600px);
+  /* 50/50 split with chat — equal flex weight, basis=0. No max-width
+     cap so the panel grows with the viewport. min-width keeps the
+     graph canvas usable on small screens. */
+  flex: 1 1 0;
+  min-width: 320px;
   display: flex;
   flex-direction: column;
   background: var(--bg-2);
@@ -1434,7 +1434,8 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); }
    layout. The graph panel stays toggleable via the topbar button. */
 @media (max-width: 1180px) and (min-width: 701px) {
   .sidebar { width: 200px; }
-  .graph-panel { max-width: 55%; min-width: 320px; }
+  /* keep the global 50/50 flex; just tighten min-width on iPad-narrow */
+  .graph-panel { min-width: 320px; }
   /* Bigger tap targets — 44px is Apple's HIG minimum */
   .send-btn { width: 42px; height: 42px; }
   .graph-action-btn,
@@ -1455,21 +1456,15 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); }
    { display: none } from the base styles takes over. Nothing to add
    here — left as a marker for the breakpoint that matters. */
 
-/* Small-laptop tuning (1181-1440): 13" MacBook Air / Pro, common external
-   monitors at 1280-1440 wide. Tighten chrome so the chat doesn't feel
-   cramped when the graph panel is open. */
+/* Small-laptop tuning (1181-1440): 13"-14" MacBook Air / Pro, external
+   monitors at 1280-1440 wide. Trim the sidebar so the 50/50 chat:graph
+   split has more room to play with. */
 @media (min-width: 1181px) and (max-width: 1440px) {
   .sidebar { width: 200px; }
-  .graph-panel {
-    flex: 1 1 clamp(340px, 34vw, 480px);
-    max-width: clamp(340px, 34vw, 480px);
-    min-width: 340px;
-  }
-  .chat-area { flex: 2 1 480px; }
   .messages { padding: 16px 16px 0; }
 }
 
-/* Larger laptops / external monitors (1441+): give a bit more breathing room. */
+/* Larger laptops / external monitors (1441+): a bit more breathing room. */
 @media (min-width: 1441px) {
   .messages { padding: 20px 24px 0; }
 }
