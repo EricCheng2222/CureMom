@@ -189,6 +189,48 @@ def test_tunnel_graph_extract_end_to_end():
     assert payload["nodes"], f"no nodes returned: error={payload.get('error')!r}"
 
 
+def test_tunnel_graph_dedup_end_to_end():
+    """User flow: the Merge button on the graph panel sends the current node
+    labels to /graph_dedup and expects equivalence groups back. This test
+    mimics that with labels that have obvious duplicates (case + hyphen +
+    plural variants) and asserts the LLM clusters them.
+    """
+    code, _, body = _post("/api/v1/graph_dedup", {
+        "labels": [
+            "B-cell", "B cell", "B cells",
+            "myostatin", "Myostatin",
+            "IGF-1", "IGF1",
+            "skeletal muscle",
+            "liver",
+        ],
+        "llm_provider": "claude/claude-haiku-4-5-20251001",
+    })
+    assert code == 200, f"start failed: HTTP {code}"
+    job_id = body["job_id"]
+
+    final = _poll(f"/api/v1/graph_dedup/job/{job_id}", max_s=120)
+    assert final["status"] == "done", f"job ended in {final['status']}: {final.get('error')}"
+
+    payload = final["payload"]
+    groups = payload.get("groups", [])
+    assert isinstance(groups, list), "groups missing or not a list"
+    # The LLM should cluster at least one of the obvious duplicate sets.
+    # We don't assert which one (model variance) — just that it found ≥1.
+    assert groups, (
+        "no merge groups returned for B-cell/B cell/B cells + Myostatin/myostatin + IGF-1/IGF1"
+    )
+    # Sanity: every group should have a canonical label + ≥2 members all
+    # drawn from the input labels (no hallucinated entries).
+    submitted = {"B-cell", "B cell", "B cells", "myostatin", "Myostatin",
+                 "IGF-1", "IGF1", "skeletal muscle", "liver"}
+    for g in groups:
+        assert g.get("canonical"), f"group missing canonical: {g}"
+        members = g.get("members") or []
+        assert len(members) >= 2, f"group has <2 members: {g}"
+        for m in members:
+            assert m in submitted, f"hallucinated member {m!r} not in input"
+
+
 def test_tunnel_polling_response_carries_no_cache():
     """A successful poll (status=pending or done) must have no-store headers.
 
