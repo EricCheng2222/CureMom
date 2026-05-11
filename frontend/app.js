@@ -194,10 +194,18 @@ async function populateProviderDropdowns() {
     [...sel.options].forEach(o => { if (o.value !== 'extractive') o.remove(); });
 
     if (claude.available) {
-      const opt = document.createElement('option');
-      opt.value = 'claude';
-      opt.textContent = `Claude (${claude.model})`;
-      sel.appendChild(opt);
+      // Two Claude variants via the backend's `claude/<model>` override:
+      // Haiku is the fast/cheap default; Sonnet is the higher-quality option
+      // for richer synthesis (used when the user wants better graph extraction).
+      const haikuOpt = document.createElement('option');
+      haikuOpt.value = 'claude/claude-haiku-4-5-20251001';
+      haikuOpt.textContent = 'Claude Haiku 4.5 (fast)';
+      sel.appendChild(haikuOpt);
+
+      const sonnetOpt = document.createElement('option');
+      sonnetOpt.value = 'claude/claude-sonnet-4-6';
+      sonnetOpt.textContent = 'Claude Sonnet 4.6 (best quality)';
+      sel.appendChild(sonnetOpt);
     }
     if (openai.available) {
       const opt = document.createElement('option');
