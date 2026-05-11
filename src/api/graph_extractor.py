@@ -257,6 +257,14 @@ def _claude_graph(user_msg: str, timeout_s: float) -> dict[str, Any]:
         messages=[{"role": "user", "content": user_msg}],
     )
     raw = msg.content[0].text if msg.content else ""
+    # Anthropic returns stop_reason="end_turn" on natural finish,
+    # "max_tokens" if the cap truncated the JSON mid-stream.
+    if getattr(msg, "stop_reason", None) == "max_tokens":
+        logger.warning(
+            "graph_extract: Claude hit max_tokens cap — JSON may be truncated. "
+            "Raw output len=%d chars",
+            len(raw),
+        )
     return _parse_graph(raw)
 
 
@@ -281,6 +289,12 @@ def _openai_graph(user_msg: str, timeout_s: float) -> dict[str, Any]:
         temperature=0.0,
     )
     raw = resp.choices[0].message.content or ""
+    finish_reason = getattr(resp.choices[0], "finish_reason", None)
+    if finish_reason == "length":
+        logger.warning(
+            "graph_extract: OpenAI hit max_tokens (finish_reason=length) — "
+            "JSON may be truncated. Raw output len=%d chars", len(raw),
+        )
     return _parse_graph(raw)
 
 
@@ -315,6 +329,12 @@ def _nim_graph(user_msg: str, provider_spec: str | None, timeout_s: float) -> di
         max_tokens=32768,
     )
     raw = resp.choices[0].message.content or ""
+    finish_reason = getattr(resp.choices[0], "finish_reason", None)
+    if finish_reason == "length":
+        logger.warning(
+            "graph_extract: NIM hit max_tokens (finish_reason=length) — "
+            "JSON may be truncated. Raw output len=%d chars", len(raw),
+        )
     return _parse_graph(raw)
 
 
