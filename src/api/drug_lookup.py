@@ -317,14 +317,11 @@ def lookup_wikipedia(name: str) -> DrugCard | None:
     summary = sections.get("summary")  # the lead paragraph(s) before any heading
 
     indications = (
-        sections.get("medical uses")
-        or sections.get("uses")
-        or sections.get("indications")
+        _find_wiki_section(sections, "medical uses", "medical use", "uses", "indications")
         or summary  # stub articles often have no "Medical uses" section; use lead
     )
     mechanism = (
-        sections.get("mechanism of action")
-        or sections.get("pharmacodynamics")
+        _find_wiki_section(sections, "mechanism of action", "pharmacodynamics", "mechanism")
         # If the summary mentions "inhibits"/"acts on" etc. and we don't have
         # a dedicated mechanism section, the summary often doubles as both.
         or (summary if indications != summary else None)
@@ -335,15 +332,32 @@ def lookup_wikipedia(name: str) -> DrugCard | None:
         source="wikipedia",
         indications=indications,
         mechanism=mechanism,
-        pharmacology=sections.get("pharmacology") or sections.get("pharmacokinetics"),
-        contraindications=sections.get("contraindications"),
-        warnings=sections.get("side effects") or sections.get("adverse effects"),
-        dosage=sections.get("dosage") or sections.get("dose"),
+        pharmacology=_find_wiki_section(sections, "pharmacology", "pharmacokinetics"),
+        contraindications=_find_wiki_section(sections, "contraindications"),
+        warnings=_find_wiki_section(sections, "side effects", "adverse effects", "adverse reactions"),
+        dosage=_find_wiki_section(sections, "dosage", "dose", "dosage and administration"),
     )
 
 
+_WIKI_HEADING_MARKER = re.compile(r"^={2,}\s*(.*?)\s*={2,}$")
+
+
+def _normalize_wiki_heading(s: str) -> str:
+    """Strip Wikipedia heading markers (== H2 ==, === H3 ===, …) so keys
+    are stored as plain lowercase text. Without this, `mechanism of action`
+    lookups miss the actual section because it's stored as
+    `=== mechanism of action ===`."""
+    m = _WIKI_HEADING_MARKER.match(s.strip())
+    return (m.group(1) if m else s).strip().lower()
+
+
 def _split_wiki_sections(text: str) -> dict[str, str]:
-    """Split a Wikipedia explaintext extract into a {lower_heading: content} map."""
+    """Split a Wikipedia explaintext extract into a {lower_heading: content} map.
+
+    Wikipedia's explaintext preserves heading lines wrapped in `==` / `===`
+    markers — those are stripped from the key so callers can do
+    `sections.get("mechanism of action")` and get a hit.
+    """
     out: dict[str, str] = {}
     # Wikipedia explaintext separates headings with a leading newline + 1+ word
     # followed by another newline. Heuristic split: lines that are short and
@@ -363,15 +377,37 @@ def _split_wiki_sections(text: str) -> dict[str, str]:
         ):
             # commit previous
             if body:
-                out[current.lower()] = " ".join(body).strip()
+                out[_normalize_wiki_heading(current)] = " ".join(body).strip()
             current = s
             body = []
         else:
             if s:
                 body.append(s)
     if body:
-        out[current.lower()] = " ".join(body).strip()
+        out[_normalize_wiki_heading(current)] = " ".join(body).strip()
     return out
+
+
+def _find_wiki_section(sections: dict[str, str], *names: str) -> str | None:
+    """Return the first section whose normalized key matches one of `names`
+    exactly, falling back to substring match. Returns None if nothing
+    matches. The substring fallback handles articles where the section is
+    nested or qualified, e.g. `discovery of the mechanism`."""
+    for n in names:
+        v = sections.get(n)
+        if v:
+            return v
+    # Substring fallback — concatenate every matching section so multi-
+    # subsection articles (Aspirin: cox-1 inhibition, prostaglandins, …)
+    # don't lose content.
+    parts: list[str] = []
+    for n in names:
+        for k, v in sections.items():
+            if n in k and v and v not in parts:
+                parts.append(v)
+    if parts:
+        return "\n\n".join(parts)
+    return None
 
 
 def cache_external_in_db(conn: psycopg.Connection, card: DrugCard) -> None:

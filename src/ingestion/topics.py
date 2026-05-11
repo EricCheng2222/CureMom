@@ -247,6 +247,47 @@ TOPICS: list[IngestionTopic] = [
         description="Ichthyosis treatments — retinoids, emollients, gene therapy, clinical trials",
         priority=1,
     ),
+    # ── Androgenetic alopecia (male / female pattern baldness) ──────────────
+    # Distinct disease entity with its own genetics (AR / DHT axis), clinical
+    # course, and treatment literature (finasteride, dutasteride, minoxidil,
+    # PRP, hair-transplant). Sister to ichthyosis in the "skin/appendage"
+    # disease cluster. 10-year window keeps the corpus focused on modern
+    # treatment evidence rather than mid-20th-century history.
+
+    IngestionTopic(
+        name="androgenetic_alopecia",
+        mesh_query='"Alopecia"[MeSH] OR "Alopecia, Androgenetic"[MeSH] OR "androgenetic alopecia"[Title/Abstract] OR "pattern baldness"[Title/Abstract] OR "male pattern hair loss"[Title/Abstract] OR "female pattern hair loss"[Title/Abstract]',
+        description="Androgenetic alopecia — pattern hair loss, AR/DHT biology, modern treatments",
+        priority=1,
+    ),
+
+    # ── Cancer (broad scope, review-grade only) ─────────────────────────────
+    # "Neoplasms"[MeSH] alone returns >3M papers; even a 10-year window is
+    # too many to ingest at our scale. We filter to systematic reviews,
+    # meta-analyses, and clinical trials to keep the corpus high-signal.
+    # Focused sub-topics (immunotherapy, targeted therapy) layer on top
+    # because they're hot, evolving areas where literature density warrants
+    # dedicated coverage even outside the review filter.
+
+    IngestionTopic(
+        name="cancer_clinical_evidence",
+        mesh_query='"Neoplasms"[MeSH] AND ("Meta-Analysis"[Publication Type] OR "Systematic Review"[Publication Type] OR "Randomized Controlled Trial"[Publication Type] OR "Practice Guideline"[Publication Type])',
+        description="Oncology — RCTs, meta-analyses, systematic reviews, practice guidelines",
+        priority=1,
+    ),
+    IngestionTopic(
+        name="cancer_immunotherapy",
+        mesh_query='"Immunotherapy"[MeSH] AND "Neoplasms"[MeSH]',
+        description="Cancer immunotherapy — checkpoint inhibitors, CAR-T, vaccines",
+        priority=1,
+    ),
+    IngestionTopic(
+        name="cancer_targeted_therapy",
+        mesh_query='"Molecular Targeted Therapy"[MeSH] AND "Neoplasms"[MeSH]',
+        description="Cancer targeted therapy — kinase inhibitors, monoclonal antibodies",
+        priority=1,
+    ),
+
     # ── Clavus / callosities (focal hyperkeratosis) ─────────────────────────
     # Clavus = corn (focal, deep, painful); callus / tyloma = diffuse.
     # Shares biology with ichthyosis (cornification, keratin) but its own

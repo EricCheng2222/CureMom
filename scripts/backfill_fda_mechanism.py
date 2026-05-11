@@ -209,23 +209,78 @@ def _update_row(conn: psycopg.Connection, row_id: int, updates: dict[str, str]) 
     conn.commit()
 
 
+def _wikipedia_updates(row: dict, missing: list[str]) -> dict[str, str]:
+    """Try Wikipedia for the fields openFDA couldn't fill. Reuses the
+    fetcher in src.api.drug_lookup which already handles the search →
+    extract → section-split pipeline + name-relevance sanity check.
+
+    Returns a dict of {db_col: text} for whichever missing fields
+    Wikipedia carried. Empty if Wikipedia didn't find the drug.
+    """
+    from src.api.drug_lookup import lookup_wikipedia
+
+    # Pure monograph names work best on Wikipedia (e.g. "ATORVASTATIN
+    # CALCIUM" → article on atorvastatin). Try the generic_name first;
+    # for combination products (NAME1, NAME2, NAME3) Wikipedia will
+    # usually punt — that's fine, we just don't fill those.
+    name = row["generic_name"]
+    # Strip dose-form noise like "ACETAMINOPHEN 325 MG" → "ACETAMINOPHEN"
+    cleaned = name.split(",")[0]
+    cleaned = " ".join(w for w in cleaned.split() if not w.replace(".", "").isdigit() and "MG" not in w.upper())
+    cleaned = cleaned.strip()
+    if len(cleaned) < 3:
+        return {}
+
+    card = lookup_wikipedia(cleaned)
+    if card is None:
+        return {}
+
+    field_map = {
+        "mechanism_of_action":       card.mechanism,
+        "indications_and_usage":     card.indications,
+        "pharmacology":              card.pharmacology,
+        "contraindications":         card.contraindications,
+        "warnings":                  card.warnings,
+        "dosage_and_administration": getattr(card, "dosage", None),
+    }
+    return {
+        col: val.strip()
+        for col, val in field_map.items()
+        if col in missing and val and val.strip()
+    }
+
+
 def backfill(
     *, names: list[str] | None = None,
     limit: int | None = None,
     dry_run: bool = False,
     rate_per_sec: float = 4.0,
+    wikipedia: bool = False,
 ) -> dict[str, int]:
     """Walk every row missing one or more clinical fields and merge in
     whatever can be salvaged from sibling openFDA labels.
 
-    Returns counters: {rows_touched, fields_filled, no_sibling_help}.
+    When `wikipedia=True`, runs a second pass for whatever's still missing
+    after the openFDA pass — fetches the matching article via
+    src.api.drug_lookup.lookup_wikipedia and pulls mechanism / indications /
+    pharmacology / contraindications / warnings / dosage from the section
+    map. Pure monographs (aspirin, ibuprofen, warfarin, ...) almost always
+    resolve; combination OTC products usually don't, which is the right
+    answer — their "mechanism" is the sum of components and isn't a
+    single Wikipedia section.
+
+    Returns counters: {rows_touched, fields_filled, no_sibling_help,
+    wiki_touched, wiki_fields_filled}.
     """
-    counters = {"rows_touched": 0, "fields_filled": 0, "no_sibling_help": 0}
+    counters = {
+        "rows_touched": 0, "fields_filled": 0, "no_sibling_help": 0,
+        "wiki_touched": 0, "wiki_fields_filled": 0,
+    }
     interval = 1.0 / rate_per_sec if rate_per_sec > 0 else 0
 
     with psycopg.connect(DB_DSN) as conn:
         candidates = _select_candidates(conn, names=names, limit=limit)
-        log.info("Found %d rows to backfill", len(candidates))
+        log.info("Found %d rows to backfill (wikipedia=%s)", len(candidates), wikipedia)
         with httpx.Client(timeout=30) as client:
             for i, row in enumerate(candidates):
                 missing = _missing_fields(row)
@@ -239,8 +294,8 @@ def backfill(
                                 i + 1, len(candidates), row["generic_name"], exc)
                     continue
 
-                # Walk siblings; for each missing field take the first
-                # sibling that has a non-empty value.
+                # Pass 1: walk siblings; for each missing field take the
+                # first sibling that has a non-empty value.
                 updates: dict[str, str] = {}
                 for sib in siblings:
                     for col in list(missing):
@@ -249,24 +304,41 @@ def backfill(
                         val = _extract(sib, col)
                         if val:
                             updates[col] = val
-                    # Stop early if we filled everything.
                     if all(c in updates for c in missing):
                         break
 
                 if not updates:
                     counters["no_sibling_help"] += 1
-                    log.debug("[%d/%d] %s — no sibling carried any of %s",
-                              i + 1, len(candidates), row["generic_name"], missing)
                 else:
                     counters["rows_touched"] += 1
                     counters["fields_filled"] += len(updates)
-                    log.info("[%d/%d] %s — filled %s",
+                    log.info("[%d/%d] %s — fda: filled %s",
                              i + 1, len(candidates),
                              row["generic_name"], ", ".join(sorted(updates.keys())))
-                    if not dry_run:
-                        _update_row(conn, row["id"], updates)
+
+                # Pass 2: Wikipedia for whatever's still missing.
+                still_missing = [c for c in missing if c not in updates]
+                wiki_updates: dict[str, str] = {}
+                if wikipedia and still_missing:
+                    try:
+                        wiki_updates = _wikipedia_updates(row, still_missing)
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning("[%d/%d] %s — wiki failed: %s",
+                                    i + 1, len(candidates), row["generic_name"], exc)
+                if wiki_updates:
+                    counters["wiki_touched"] += 1
+                    counters["wiki_fields_filled"] += len(wiki_updates)
+                    log.info("[%d/%d] %s — wiki: filled %s",
+                             i + 1, len(candidates),
+                             row["generic_name"], ", ".join(sorted(wiki_updates.keys())))
+                    updates.update(wiki_updates)
+
+                if updates and not dry_run:
+                    _update_row(conn, row["id"], updates)
 
                 # Respect rate limit (openFDA: 240/min unauth = 4/s).
+                # Wikipedia is also pretty generous (no published cap on
+                # the public REST API), no need to throttle separately.
                 elapsed = time.monotonic() - t0
                 sleep = max(0.0, interval - elapsed)
                 if sleep:
@@ -285,19 +357,29 @@ def _parse_args() -> argparse.Namespace:
                    help="Log what would be filled but don't UPDATE.")
     p.add_argument("--rate", type=float, default=4.0,
                    help="Max openFDA requests per second (default 4 — well under the 240/min cap).")
+    p.add_argument("--wikipedia", action="store_true",
+                   help="Second pass: for rows still missing fields after the openFDA "
+                        "sibling search, fetch the drug's Wikipedia article and pull "
+                        "mechanism / indications / pharmacology / contraindications / "
+                        "warnings / dosage from its section map.")
     return p.parse_args()
 
 
 def main() -> int:
     args = _parse_args()
-    log.info("Backfilling fda_drugs (dry_run=%s names=%s limit=%s)",
-             args.dry_run, args.names, args.limit)
+    log.info("Backfilling fda_drugs (dry_run=%s names=%s limit=%s wikipedia=%s)",
+             args.dry_run, args.names, args.limit, args.wikipedia)
     counters = backfill(
         names=args.names, limit=args.limit,
         dry_run=args.dry_run, rate_per_sec=args.rate,
+        wikipedia=args.wikipedia,
     )
-    log.info("Done. rows_touched=%d  fields_filled=%d  no_sibling_help=%d",
-             counters["rows_touched"], counters["fields_filled"], counters["no_sibling_help"])
+    log.info(
+        "Done. fda: rows_touched=%d fields_filled=%d no_sibling_help=%d  |  "
+        "wiki: rows_touched=%d fields_filled=%d",
+        counters["rows_touched"], counters["fields_filled"], counters["no_sibling_help"],
+        counters["wiki_touched"], counters["wiki_fields_filled"],
+    )
     return 0
 
 
