@@ -308,6 +308,75 @@ function closeProviderSheet() {
 
 window.closeProviderSheet = closeProviderSheet;   // for inline onclick
 
+// ── Settings sheet (mobile-only — opened by ⚙ in chat topbar) ───────────
+// Aggregates Plain-language / Provider / Strategy into one sheet so the
+// inline chat-controls row can be hidden on phone. Each row either flips
+// a switch in place (plain-language) or opens a child sheet (provider,
+// strategy) for the actual picker.
+function openSettingsSheet() {
+  const sheet = document.getElementById('settings-sheet');
+  if (!sheet) return;
+  // Sync the inline toggle into the sheet on every open.
+  const simpleSrc = document.getElementById('consumer-simple');
+  const simpleDst = document.getElementById('settings-simple-toggle');
+  if (simpleSrc && simpleDst) {
+    simpleDst.checked = simpleSrc.checked;
+    simpleDst.onchange = () => { simpleSrc.checked = simpleDst.checked; };
+  }
+  // Show the current provider + strategy labels as hints.
+  const pSel = document.getElementById('consumer-provider');
+  const sSel = document.getElementById('consumer-strategy');
+  const pHint = document.getElementById('settings-provider-current');
+  const sHint = document.getElementById('settings-strategy-current');
+  if (pSel && pHint) {
+    const opt = pSel.options[pSel.selectedIndex];
+    pHint.textContent = opt ? opt.textContent : '—';
+  }
+  if (sSel && sHint) {
+    const opt = sSel.options[sSel.selectedIndex];
+    sHint.textContent = opt ? opt.textContent : '—';
+  }
+  sheet.hidden = false;
+  requestAnimationFrame(() => requestAnimationFrame(() => sheet.classList.add('open')));
+}
+function closeSettingsSheet() {
+  const sheet = document.getElementById('settings-sheet');
+  if (!sheet) return;
+  sheet.classList.remove('open');
+  setTimeout(() => { sheet.hidden = true; }, 240);
+}
+window.openSettingsSheet = openSettingsSheet;
+window.closeSettingsSheet = closeSettingsSheet;
+
+// Strategy bottom sheet — same UX as provider sheet.
+function openStrategySheet() {
+  const select = document.getElementById('consumer-strategy');
+  const sheet  = document.getElementById('strategy-sheet');
+  const list   = document.getElementById('strategy-sheet-list');
+  if (!select || !sheet || !list) return;
+  list.innerHTML = [...select.options].map((o) => {
+    const sel = o.value === select.value ? ' sel' : '';
+    return `<li><button class="sheet-opt${sel}" type="button" data-v="${escapeHtml(o.value)}" ${o.disabled ? 'disabled' : ''}>${escapeHtml(o.textContent)}</button></li>`;
+  }).join('');
+  list.onclick = (e) => {
+    const btn = e.target.closest('.sheet-opt');
+    if (!btn || btn.disabled) return;
+    select.value = btn.dataset.v;
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+    closeStrategySheet();
+  };
+  sheet.hidden = false;
+  requestAnimationFrame(() => requestAnimationFrame(() => sheet.classList.add('open')));
+}
+function closeStrategySheet() {
+  const sheet = document.getElementById('strategy-sheet');
+  if (!sheet) return;
+  sheet.classList.remove('open');
+  setTimeout(() => { sheet.hidden = true; }, 240);
+}
+window.openStrategySheet = openStrategySheet;
+window.closeStrategySheet = closeStrategySheet;
+
 // Validate any stored key + reveal the Share section if so.
 _refreshAuthState();
 

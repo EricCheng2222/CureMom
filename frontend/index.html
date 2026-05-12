@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="style.css?v=24" />
+  <link rel="stylesheet" href="style.css?v=25" />
   <script>
     // Buffer onclick="switchMode(...)" calls that fire before the deferred
     // app.js finishes parsing — otherwise an early landing-card click throws
@@ -22,7 +22,7 @@
   <script src="https://unpkg.com/cose-base@2.2.0/cose-base.js" defer></script>
   <script src="https://unpkg.com/cytoscape-fcose@2.2.0/cytoscape-fcose.js" defer></script>
   <script src="graph.js?v=12" defer></script>
-  <script src="app.js?v=47" defer></script>
+  <script src="app.js?v=48" defer></script>
 </head>
 <body>
 
@@ -144,6 +144,15 @@
           <span>Graph</span>
         </button>
         <button class="topbar-mode-btn" onclick="switchMode('professional')">Researcher mode →</button>
+        <!-- Mobile-only: settings gear opens a sheet with Plain language /
+             Provider / Strategy controls (hidden on desktop, where those
+             live inline in the chat-controls row below the input). -->
+        <button class="topbar-settings-btn" onclick="openSettingsSheet()" aria-label="Settings">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+            <circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="1.7"/>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
       </div>
 
       <div class="messages" id="chat-messages">
@@ -159,9 +168,13 @@
         </div>
       </div>
 
-      <div class="chat-disclaimer">
-        <strong>Not medical advice.</strong> Research prototype — outputs are AI summaries of public papers and may be wrong, incomplete, or out of date. Never use for treatment, dosing, or diagnostic decisions. Consult a licensed healthcare professional. Emergency? Call your local emergency number.
-      </div>
+      <!-- On phones (≤700 px) this collapses to a single line that taps
+           to expand. Desktop keeps the full text always visible. -->
+      <button class="chat-disclaimer" type="button" onclick="this.classList.toggle('expanded')" aria-label="Medical disclaimer — tap to expand">
+        <span class="disclaimer-short"><strong>Not medical advice.</strong></span>
+        <span class="disclaimer-full"> Research prototype — outputs are AI summaries of public papers and may be wrong, incomplete, or out of date. Never use for treatment, dosing, or diagnostic decisions. Consult a licensed healthcare professional. Emergency? Call your local emergency number.</span>
+        <span class="disclaimer-chevron" aria-hidden="true">▾</span>
+      </button>
 
       <div class="chat-input-bar">
         <div class="chat-input-box">
@@ -285,6 +298,53 @@
     <div class="sheet-drag-handle" aria-hidden="true"></div>
     <div class="sheet-title">Choose a model</div>
     <ul id="provider-sheet-list" role="listbox"></ul>
+  </div>
+</div>
+
+<!-- Settings bottom sheet (mobile-only) — gathers Plain-language toggle +
+     Provider picker + Strategy picker behind a single ⚙ tap. On desktop
+     these live inline in the chat-controls row beneath the input. -->
+<div id="settings-sheet" class="sheet" hidden role="dialog" aria-modal="true" aria-label="Chat settings">
+  <div class="sheet-backdrop" onclick="closeSettingsSheet()"></div>
+  <div class="sheet-panel">
+    <div class="sheet-drag-handle" aria-hidden="true"></div>
+    <div class="sheet-title">Chat settings</div>
+    <div class="sheet-content">
+      <div class="settings-row">
+        <label class="settings-row-label" for="settings-simple-toggle">
+          <span>Plain language</span>
+          <span class="settings-row-hint">Shorter answers without jargon</span>
+        </label>
+        <label class="settings-switch">
+          <input type="checkbox" id="settings-simple-toggle" />
+          <span class="settings-switch-track"></span>
+        </label>
+      </div>
+      <div class="settings-row" onclick="openProviderSheet(document.getElementById('consumer-provider'));closeSettingsSheet()">
+        <div class="settings-row-label">
+          <span>Model</span>
+          <span class="settings-row-hint" id="settings-provider-current">—</span>
+        </div>
+        <span class="settings-row-chev">›</span>
+      </div>
+      <div class="settings-row" onclick="openStrategySheet()">
+        <div class="settings-row-label">
+          <span>Retrieval</span>
+          <span class="settings-row-hint" id="settings-strategy-current">—</span>
+        </div>
+        <span class="settings-row-chev">›</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Strategy bottom sheet (mobile-only) — same UX as provider sheet -->
+<div id="strategy-sheet" class="sheet" hidden role="dialog" aria-modal="true" aria-label="Choose retrieval strategy">
+  <div class="sheet-backdrop" onclick="closeStrategySheet()"></div>
+  <div class="sheet-panel">
+    <div class="sheet-drag-handle" aria-hidden="true"></div>
+    <div class="sheet-title">Choose retrieval strategy</div>
+    <ul id="strategy-sheet-list" role="listbox"></ul>
   </div>
 </div>
 
