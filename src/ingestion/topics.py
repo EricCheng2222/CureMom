@@ -247,6 +247,67 @@ TOPICS: list[IngestionTopic] = [
         description="Ichthyosis treatments — retinoids, emollients, gene therapy, clinical trials",
         priority=1,
     ),
+    # ── Sound / light frequency-based therapies ────────────────────────────
+    # Non-pharmacologic interventions that use specific frequencies of
+    # light, sound, or mechanical vibration. Mainstream clinical evidence
+    # exists for some (UV phototherapy for psoriasis; LLLT for chronic
+    # pain) and is emerging for others (red light for skin / wound healing,
+    # transcranial photobiomodulation for cognition, music therapy for
+    # neuropsychiatric conditions). Broad Phototherapy[MeSH] is ~33K papers
+    # — we filter to RCTs + reviews + meta-analyses to keep it tractable.
+
+    IngestionTopic(
+        name="phototherapy_clinical",
+        mesh_query='"Phototherapy"[MeSH] AND ("Randomized Controlled Trial"[Publication Type] OR "Meta-Analysis"[Publication Type] OR "Systematic Review"[Publication Type] OR "Practice Guideline"[Publication Type])',
+        description="Clinical phototherapy — UV for psoriasis/vitiligo/eczema, bright light for SAD, blue light for jaundice (RCTs + reviews)",
+        priority=1,
+    ),
+    IngestionTopic(
+        name="photobiomodulation",
+        mesh_query='"Low-Level Light Therapy"[MeSH] OR "low-level laser therapy"[Title/Abstract] OR "low level laser therapy"[Title/Abstract] OR "photobiomodulation"[Title/Abstract] OR "LLLT"[Title/Abstract] OR ("red light therapy"[Title/Abstract] AND ("Randomized Controlled Trial"[Publication Type] OR "Review"[Publication Type]))',
+        description="Photobiomodulation / LLLT — red + near-IR light for pain, wound healing, hair regrowth, transcranial use",
+        priority=1,
+    ),
+    IngestionTopic(
+        name="ultrasound_therapy",
+        mesh_query='"Ultrasonic Therapy"[MeSH] OR "therapeutic ultrasound"[Title/Abstract] OR "focused ultrasound"[Title/Abstract]',
+        description="Therapeutic ultrasound — soft-tissue rehab, HIFU oncology, transcranial focused ultrasound",
+        priority=1,
+    ),
+    IngestionTopic(
+        name="music_sound_therapy",
+        mesh_query='"Music Therapy"[MeSH] OR "Acoustic Stimulation"[MeSH] OR "music therapy"[Title/Abstract] OR "binaural beats"[Title/Abstract] OR "sound therapy"[Title/Abstract] OR "auditory stimulation"[Title/Abstract]',
+        description="Music + acoustic / sound-frequency therapy — tinnitus retraining, binaural beats, music in dementia + anxiety",
+        priority=1,
+    ),
+
+    # ── Urticaria (hives) ───────────────────────────────────────────────────
+    # Allergic / mast-cell driven skin disease. Recent literature is
+    # therapy-rich — omalizumab (anti-IgE) is standard-of-care for chronic
+    # spontaneous urticaria; ligelizumab + remibrutinib + dupilumab are
+    # next-gen options. ~6K papers in the 2015-2026 window — small,
+    # manageable, sits alongside the existing ichthyosis / alopecia /
+    # clavus dermatology cluster.
+
+    IngestionTopic(
+        name="urticaria_core",
+        mesh_query='"Urticaria"[MeSH] OR "urticaria"[Title/Abstract] OR "hives"[Title/Abstract]',
+        description="Urticaria / hives — broad coverage including acute, chronic, physical subtypes",
+        priority=1,
+    ),
+    IngestionTopic(
+        name="urticaria_chronic",
+        mesh_query='"Chronic Urticaria"[MeSH] OR "Urticaria, Chronic"[MeSH] OR "chronic spontaneous urticaria"[Title/Abstract] OR "chronic idiopathic urticaria"[Title/Abstract] OR "CSU"[Title/Abstract] OR "CIU"[Title/Abstract]',
+        description="Chronic spontaneous / idiopathic urticaria (CSU / CIU) — the modern therapy-rich literature",
+        priority=1,
+    ),
+    IngestionTopic(
+        name="urticaria_treatment",
+        mesh_query='("Urticaria"[MeSH]) AND ("Omalizumab"[MeSH] OR "Histamine H1 Antagonists"[MeSH] OR "therapy"[Subheading] OR "drug therapy"[Subheading] OR "ligelizumab"[Title/Abstract] OR "dupilumab"[Title/Abstract] OR "remibrutinib"[Title/Abstract] OR "Randomized Controlled Trial"[Publication Type])',
+        description="Urticaria treatments — omalizumab, antihistamines, next-gen biologics + BTK inhibitors",
+        priority=1,
+    ),
+
     # ── Androgenetic alopecia (male / female pattern baldness) ──────────────
     # Distinct disease entity with its own genetics (AR / DHT axis), clinical
     # course, and treatment literature (finasteride, dutasteride, minoxidil,
