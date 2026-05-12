@@ -27,7 +27,7 @@ from typing import Any
 
 import httpx
 
-from .graph_extractor import emit_heartbeat, _suffix_for_model, _route_nim_model_for_structured
+from .graph_extractor import emit_heartbeat, _suffix_for_model
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +104,7 @@ def dedup_entities(
     if len(labels) < 2:
         return []
     if timeout_s is None:
-        timeout_s = float(os.environ.get("GRAPH_TIMEOUT_S", "120"))
+        timeout_s = float(os.environ.get("GRAPH_TIMEOUT_S", "1800"))
 
     user_msg = f"Labels ({len(labels)}):\n" + "\n".join(f"- {lbl}" for lbl in labels)
     target = _resolve_provider(provider_spec)
@@ -201,17 +201,11 @@ def _nim_dedup(user_msg: str, model: str | None, timeout_s: float) -> str:
     api_key = os.environ.get("NVIDIA_API_KEY", "").strip()
     if not api_key or api_key == "your_nvidia_api_key_here":
         raise RuntimeError("NVIDIA_API_KEY not set in env")
-    requested = model or os.environ.get("NIM_MODEL", "meta/llama-4-maverick-17b-128e-instruct")
-    # Same reasoning-model reroute as _nim_graph — MiniMax dedup is 100+ s,
-    # llama dedup is <10 s. Users who pick MiniMax for QA still get
-    # MiniMax for QA; this only affects the structured-output Merge call.
-    model = _route_nim_model_for_structured(requested)
+    model = model or os.environ.get("NIM_MODEL", "meta/llama-4-maverick-17b-128e-instruct")
     base_url = os.environ.get("NIM_BASE_URL", "https://integrate.api.nvidia.com/v1")
 
+    # No model rerouting — whatever was picked runs the call.
     system_prompt = _DEDUP_PROMPT + _suffix_for_model(model)
-    if model != requested:
-        logger.info("graph_dedup: rerouted reasoning model %s → %s "
-                    "(non-reasoning; QA still uses %s)", requested, model, requested)
     logger.info("graph_dedup: calling NIM (model=%s, timeout=%.0fs, no_think=%s)",
                 model, timeout_s, bool(_suffix_for_model(model)))
     client = openai.OpenAI(api_key=api_key, base_url=base_url, timeout=timeout_s)

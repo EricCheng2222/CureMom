@@ -295,27 +295,6 @@ def _suffix_for_model(model: str | None) -> str:
     return ""
 
 
-# Non-reasoning fallback for structured-output tasks on NIM. MiniMax-M2.7
-# emits ~3K thinking tokens before any JSON regardless of the no-think
-# suffix — for a long answer the graph_extract call can exceed the 600 s
-# request timeout entirely. We auto-route graph_extract + graph_dedup to
-# this fast llama sibling when the resolved NIM model is a reasoning one.
-# QA (synthesize) is unaffected: users who pick MiniMax keep MiniMax there.
-_NIM_NON_REASONING_FALLBACK = "meta/llama-4-maverick-17b-128e-instruct"
-
-
-def _route_nim_model_for_structured(model: str | None) -> str | None:
-    """If `model` is a known reasoning model on NIM, return the
-    non-reasoning fallback. Otherwise return the input unchanged. Used by
-    `_nim_graph` and `_nim_dedup` (NOT by QA synthesis)."""
-    if not model:
-        return model
-    m = model.lower()
-    if "minimax" in m or "deepseek-r1" in m or "qwq" in m:
-        return _NIM_NON_REASONING_FALLBACK
-    return model
-
-
 def _llm_graph(
     query: str,
     answer: str,
@@ -328,10 +307,14 @@ def _llm_graph(
     Defaults to NIM (free tier) when no provider is specified.
 
     Tunable via env:
-      GRAPH_TIMEOUT_S — request timeout (default 600s)
+      GRAPH_TIMEOUT_S — request timeout (default 1800 s, env-tunable).
+                        Reasoning models on NIM (MiniMax-M2.7) can take
+                        many minutes for graph extraction; this is wide
+                        enough to let them finish. Override lower in .env
+                        if you want faster fails.
     """
     if timeout_s is None:
-        timeout_s = float(os.environ.get("GRAPH_TIMEOUT_S", "600"))
+        timeout_s = float(os.environ.get("GRAPH_TIMEOUT_S", "1800"))
 
     user_msg = _build_user_message(query, answer)
     target = _resolve_provider(provider_spec)
@@ -423,20 +406,14 @@ def _nim_graph(user_msg: str, model: str | None, timeout_s: float) -> dict[str, 
     api_key = os.environ.get("NVIDIA_API_KEY", "").strip()
     if not api_key or api_key == "your_nvidia_api_key_here":
         raise RuntimeError("NVIDIA_API_KEY not set in env")
-    requested = model or os.environ.get("NIM_MODEL", "meta/llama-4-maverick-17b-128e-instruct")
-    # Reasoning models on NIM (MiniMax-M2.x, deepseek-r1, qwq, …) emit
-    # thousands of thinking tokens before any JSON regardless of the no-
-    # think prompt suffix; for graph_extract that frequently exceeds the
-    # request timeout. Auto-route the structured-output call to a fast
-    # non-reasoning sibling instead. The user's choice for QA synthesis
-    # is unaffected — only this function (and _nim_dedup) re-routes.
-    model = _route_nim_model_for_structured(requested)
+    model = model or os.environ.get("NIM_MODEL", "meta/llama-4-maverick-17b-128e-instruct")
     base_url = os.environ.get("NIM_BASE_URL", "https://integrate.api.nvidia.com/v1")
 
+    # No-think suffix still appended for reasoning models as a best-effort
+    # nudge, but we no longer reroute the model itself — whatever the user
+    # picked runs the job. Reasoning models on NIM may take many minutes
+    # for graph extraction; the request timeout is GRAPH_TIMEOUT_S.
     system_prompt = _GRAPH_PROMPT + _suffix_for_model(model)
-    if model != requested:
-        logger.info("graph_extract: rerouted reasoning model %s → %s "
-                    "(non-reasoning; QA still uses %s)", requested, model, requested)
     logger.info("graph_extract: calling NIM (model=%s, timeout=%.0fs, no_think=%s)",
                 model, timeout_s, bool(_suffix_for_model(model)))
     client = openai.OpenAI(api_key=api_key, base_url=base_url, timeout=timeout_s)
