@@ -46,3 +46,9 @@ htmlcov/
 # Docker volumes (if mounted locally)
 postgres_data/
 es_data/
+
+# Tailwind CSS toolchain — dev deps only, no build artifacts to ship.
+# `frontend/style.css` IS committed (it's the final stylesheet served to
+# users); `node_modules/` is not.
+frontend/node_modules/
+frontend/package-lock.json

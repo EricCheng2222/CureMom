@@ -1,0 +1,13 @@
+{
+  "name": "curemom-frontend",
+  "private": true,
+  "description": "Tailwind tooling for the CureMom static frontend. No bundler, no SPA — Tailwind CLI compiles src.css → style.css, which uvicorn serves directly. Edit src.css; run `npm run build` (or `npm run dev` for watch).",
+  "scripts": {
+    "build": "tailwindcss -i ./src.css -o ./style.css --minify",
+    "dev":   "tailwindcss -i ./src.css -o ./style.css --watch"
+  },
+  "devDependencies": {
+    "tailwindcss": "^4.1.0",
+    "@tailwindcss/cli": "^4.1.0"
+  }
+}

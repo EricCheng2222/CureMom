@@ -726,6 +726,31 @@ See [`TODO.md`](TODO.md) for the full task list.
 
 ---
 
+## Frontend (Tailwind CSS, no SPA)
+
+The frontend is vanilla HTML/JS plus a Tailwind v4 stylesheet. There's no bundler, no JSX, no framework runtime — just a single CLI step that compiles `frontend/src.css` (edit this) → `frontend/style.css` (committed; served as-is by uvicorn).
+
+```bash
+cd frontend
+npm install               # one-time
+npm run dev               # watch mode — edit src.css, style.css regenerates on save
+npm run build             # one-shot minified build before commit
+```
+
+Why Tailwind v4 here:
+- `@theme inline` in `src.css` mirrors the existing CSS variables, so utility classes (`bg-accent`, `text-secondary`, `bg-node-disease`, …) automatically follow the `prefers-color-scheme` light/dark flip we already had.
+- New components in `index.html` can use utility classes directly. The existing 1,600 lines of bespoke CSS (`.msg-ai`, `.citation-pill`, `.graph-panel`, …) keep working untouched — they live in the cascade below the `@theme` block.
+- `graph.js` reads `--node-chemical / --node-disease / …` via `getComputedStyle` on init; those raw vars stay on `:root` so the graph palette never had to migrate.
+- No bundler step: deploy is still "edit + push" once `npm run build` regenerates `style.css`.
+
+When editing the frontend:
+1. Edit `frontend/src.css` (or add Tailwind utility classes directly in `index.html`).
+2. Run `npm run build` in `frontend/`.
+3. Bump the `style.css?v=NN` query string in `index.html` so cached browsers re-fetch.
+4. Commit both `src.css` and the regenerated `style.css`.
+
+---
+
 ## Tests
 
 `pytest tests/` runs the in-process suite end-to-end against a `TestClient` (no Postgres / Elasticsearch / network needed). The opt-in tunnel suite is the only piece that hits the real wire:
