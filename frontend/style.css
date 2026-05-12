@@ -1261,6 +1261,71 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); }
   40% { opacity: 1; transform: scale(1.1); }
 }
 
+/* ── Sentence-streamed answer reveal ─────────────────────
+ * Each text run in an AI bubble is wrapped in <span class="stream-piece">
+ * and `.shown` is added on a stagger so sentences fade in. Citation
+ * buttons (.citation-ref) stay non-streamed to keep them tappable
+ * immediately. Reduced-motion users get atomic render via JS. */
+.stream-piece {
+  opacity: 0;
+  transition: opacity 240ms ease-out;
+}
+.stream-piece.shown { opacity: 1; }
+@media (prefers-reduced-motion: reduce) {
+  .stream-piece, .stream-piece.shown { opacity: 1; transition: none; }
+}
+
+/* ── Graph skeleton (Phase 4) ───────────────────────────
+ * Shimmering placeholder nodes + edges while _extractGraph polls. Sits
+ * over the Cytoscape canvas inside .graph-canvas-wrap. Removed by JS
+ * once KGraph.merge populates real nodes. */
+.graph-skeleton {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 2;
+}
+.graph-skeleton[hidden] { display: none; }
+.skel-node {
+  position: absolute;
+  width: 38px; height: 38px;
+  border-radius: 50%;
+  background: linear-gradient(120deg,
+              var(--surface-2) 0%,
+              var(--surface-3) 50%,
+              var(--surface-2) 100%);
+  background-size: 200% 100%;
+  animation: skelShimmer 1.8s ease-in-out infinite;
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-sm);
+}
+.skel-node.n0 { top: 18%;  left: 22%;  animation-delay: 0.0s; }
+.skel-node.n1 { top: 38%;  left: 58%;  animation-delay: 0.2s; }
+.skel-node.n2 { top: 62%;  left: 30%;  animation-delay: 0.4s; }
+.skel-node.n3 { top: 26%;  left: 76%;  width: 30px; height: 30px; animation-delay: 0.6s; }
+.skel-node.n4 { top: 70%;  left: 70%;  animation-delay: 0.3s; }
+.skel-node.n5 { top: 14%;  left: 52%;  width: 26px; height: 26px; animation-delay: 0.5s; }
+.skel-edges {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  stroke: var(--border-strong);
+  stroke-width: 1.5;
+  fill: none;
+  opacity: 0.45;
+  animation: skelFade 2.4s ease-in-out infinite alternate;
+}
+@keyframes skelShimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+@keyframes skelFade {
+  from { opacity: 0.25; }
+  to   { opacity: 0.55; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .skel-node, .skel-edges { animation: none; }
+}
+
 .graph-legend {
   display: flex;
   flex-wrap: wrap;

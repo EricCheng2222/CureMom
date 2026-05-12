@@ -583,6 +583,29 @@ function _showGraphSpinner(show) {
   if (sp) sp.hidden = !show;
 }
 
+// Skeleton shimmer over the canvas while the LLM is generating relations.
+// Rendered into .graph-canvas-wrap once; hidden via [hidden] thereafter.
+function _showGraphSkeleton(show) {
+  const wrap = document.querySelector('.graph-canvas-wrap');
+  if (!wrap) return;
+  let el = document.getElementById('graph-skeleton');
+  if (!el && show) {
+    el = document.createElement('div');
+    el.id = 'graph-skeleton';
+    el.className = 'graph-skeleton';
+    el.innerHTML =
+      Array.from({ length: 6 }, (_, i) => `<span class="skel-node n${i}"></span>`).join('') +
+      '<svg class="skel-edges" viewBox="0 0 400 300" preserveAspectRatio="none">' +
+        '<path d="M 90 70 Q 200 130 240 130 T 310 80"/>' +
+        '<path d="M 240 130 Q 200 200 130 200"/>' +
+        '<path d="M 130 200 Q 220 240 290 220"/>' +
+        '<path d="M 90 70 Q 160 60 220 50"/>' +
+      '</svg>';
+    wrap.appendChild(el);
+  }
+  if (el) el.hidden = !show;
+}
+
 // Clean the assistant response into prose suitable for graph extraction.
 // Same idea as pushAssistantToHistory but kept local so we can call it
 // before pushing to history.
@@ -626,6 +649,7 @@ async function _extractGraph(query, response, citations) {
   console.log('[KGraph] POST /api/v1/graph_extract with', chunks.length, 'chunks, provider:', provider);
 
   if (_isGraphPanelOpen()) _showGraphSpinner(true);
+  _showGraphSkeleton(true);
   // Run the LLM call as a background job, poll until done. Each HTTP
   // round-trip is short and survives any tunnel cap. The job itself can
   // run as long as the LLM needs (up to 180 s wall-clock).
@@ -695,7 +719,10 @@ async function _extractGraph(query, response, citations) {
   } finally {
     // Only the most-recent call owns the spinner — a stale one finishing
     // late must not turn off the spinner the newer call just turned on.
-    if (token === _graphExtractToken) _showGraphSpinner(false);
+    if (token === _graphExtractToken) {
+      _showGraphSpinner(false);
+      _showGraphSkeleton(false);
+    }
   }
 }
 
@@ -1110,9 +1137,78 @@ function appendAIBubble(text, citations) {
     <div class="msg-avatar">
       <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 2C5.24 2 3 4.24 3 7C3 9.76 5.24 12 8 12C10.76 12 13 9.76 13 7" stroke="white" stroke-width="1.5" stroke-linecap="round"/><path d="M7 5H9M8 3V9" stroke="white" stroke-width="1.5" stroke-linecap="round"/></svg>
     </div>
-    <div class="msg-content"><div>${linked}</div>${citeHtml}${followupHtml}</div>`;
+    <div class="msg-content"><div data-stream-target></div>${citeHtml}${followupHtml}</div>`;
   msgs.appendChild(d);
+  _streamHtmlInto(d.querySelector('[data-stream-target]'), linked, 1500);
   scrollChat();
+}
+
+// Sentence-stream `html` into `host`. Walks the parsed DOM, wraps text
+// runs in `<span class="stream-piece">`, and reveals them on a stagger
+// scaled to fit `durationMs`. Respects prefers-reduced-motion (renders
+// the full content atomically). The HTML contains citation buttons
+// (.citation-ref) which we treat as atomic non-text nodes.
+function _streamHtmlInto(host, html, durationMs) {
+  if (!host) return;
+  // Reduced-motion: behave like the original atomic append.
+  if (matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    host.innerHTML = html;
+    return;
+  }
+
+  const tmp = document.createElement('div');
+  tmp.innerHTML = html;
+
+  // Walk all text nodes; split each by sentence-ish boundaries; replace
+  // the text node with a sequence of <span class="stream-piece"> wrappers.
+  const pieces = [];
+  const _split = (text) => {
+    // Split into chunks on sentence punctuation (.?!) followed by space
+    // or end. Keep the trailing whitespace attached to the previous chunk.
+    const out = [];
+    let buf = '';
+    for (let i = 0; i < text.length; i++) {
+      buf += text[i];
+      if (/[.?!]/.test(text[i]) && (text[i + 1] === ' ' || i === text.length - 1)) {
+        // Include the trailing space if present.
+        if (text[i + 1] === ' ') { buf += ' '; i++; }
+        out.push(buf); buf = '';
+      }
+    }
+    if (buf) out.push(buf);
+    return out;
+  };
+
+  const walker = document.createTreeWalker(tmp, NodeFilter.SHOW_TEXT);
+  const targets = [];
+  while (walker.nextNode()) targets.push(walker.currentNode);
+  for (const node of targets) {
+    const text = node.nodeValue;
+    if (!text || !text.trim()) continue;
+    const chunks = _split(text);
+    if (chunks.length === 0) continue;
+    const frag = document.createDocumentFragment();
+    for (const ch of chunks) {
+      const span = document.createElement('span');
+      span.className = 'stream-piece';
+      span.textContent = ch;
+      frag.appendChild(span);
+      pieces.push(span);
+    }
+    node.parentNode.replaceChild(frag, node);
+  }
+
+  host.replaceChildren(...tmp.childNodes);
+
+  if (pieces.length === 0) return;
+  const per = Math.max(30, Math.floor(durationMs / pieces.length));
+  pieces.forEach((el, i) => {
+    setTimeout(() => {
+      el.classList.add('shown');
+      // Re-scroll periodically while text grows.
+      if (i % 4 === 0 || i === pieces.length - 1) scrollChat();
+    }, per * i);
+  });
 }
 
 // Click handler for follow-up suggestion chips
