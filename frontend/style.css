@@ -1781,9 +1781,16 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); }
   .app-shell {
     flex-direction: column;
     height: 100dvh;
+    min-height: 0;
   }
   .sidebar { display: none; }
-  .chat-area, .graph-panel { flex: 1 1 auto; min-height: 0; width: 100%; }
+  /* min-height:0 lets the inner .messages scroll instead of the entire
+   * chat-area growing past the column's allocated space (which would
+   * break scrolling — content "stuck" beyond the screen edge). */
+  .chat-area, .graph-panel { flex: 1 1 auto; min-height: 0; width: 100%; height: 100%; }
+  .chat-area  { display: flex; flex-direction: column; min-height: 0; }
+  .graph-panel { min-height: 0; }
+  .messages { min-height: 0; }
 
   /* Tab swap — only one panel visible at a time on phone. !important
    * beats both .graph-panel.collapsed (set by desktop toggleGraphPanel)
