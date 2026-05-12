@@ -1027,6 +1027,37 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); }
 }
 .modal-close-btn:hover { background: var(--surface-2); color: var(--text); }
 
+/* Drag handle for pull-to-dismiss on phones (Phase 6). Only the top
+ * ~60 px of the card initiates the swipe; touchmoves below pass through
+ * to the modal's natural scroll behaviour. */
+.modal-drag-handle {
+  width: 40px;
+  height: 4px;
+  border-radius: 99px;
+  background: var(--border-2);
+  margin: -16px auto 12px;
+}
+@media (min-width: 901px) {
+  .modal-drag-handle { display: none; }   /* no swipe on desktop */
+}
+
+/* Merge button hi-vis state — when _extractGraph detects likely
+ * duplicates via Jaccard ≥0.7 on node labels, this class is toggled on
+ * the Merge button to draw attention. Cleared after a successful merge. */
+.graph-action-btn.has-duplicates {
+  background: linear-gradient(135deg, var(--accent), var(--green));
+  color: #fff;
+  border-color: transparent;
+  animation: mergePulse 1.6s ease-in-out infinite;
+}
+@keyframes mergePulse {
+  0%, 100% { box-shadow: 0 0 0 0 var(--accent-subtle); }
+  50%      { box-shadow: 0 0 0 6px rgba(79,70,229,0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .graph-action-btn.has-duplicates { animation: none; }
+}
+
 .modal-pmid-link {
   display: inline-flex; align-items: center; gap: 5px;
   font-size: 12px; font-weight: 600;

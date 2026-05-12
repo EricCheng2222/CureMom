@@ -625,6 +625,9 @@ async function _onMergeClick() {
     console.log('[KGraph] received', groups.length, 'merge groups:', groups);
     const before = KGraph.size().nodes;
     const result = KGraph.applyMergeGroups(groups);
+    // Re-check duplicates AFTER the merge — typically clears the
+    // hi-vis state, but a partial merge may leave residual dupes.
+    _detectAndFlagDuplicates();
     const after = KGraph.size().nodes;
     const status = result.groupsApplied > 0
       ? `Merged ${result.groupsApplied} group${result.groupsApplied !== 1 ? 's' : ''} (${before} → ${after} nodes)`
@@ -759,6 +762,7 @@ async function _extractGraph(query, response, citations) {
     const result = KGraph.merge(payload);
     console.log('[KGraph] merged —', result.addedNodes.length, 'new nodes,', result.addedEdges.length, 'new edges');
     _bumpGraphBadge(result.addedNodes.length);   // bottom-nav badge on mobile when user is on chat tab
+    _detectAndFlagDuplicates();                  // nudge Merge button when likely dupes exist
     // Partial payload: graph built from a truncated LLM input or output.
     // Surface the specific reason in the graph chrome (input vs output is
     // actionable — input truncation means shorten the question; output
@@ -1471,6 +1475,87 @@ function closeModal(e) {
   if (e.target === document.getElementById('citation-modal')) {
     document.getElementById('citation-modal').hidden = true;
   }
+}
+
+// ── Pull-to-dismiss the citation modal on phones (Phase 6) ──────────────
+// Touch starts in the top ~60 px of the .modal-card (where the drag
+// handle lives) initiate a drag. The card follows the finger via
+// translateY; releasing past 120 px closes the modal.
+function _bindModalSwipe() {
+  const card = document.getElementById('citation-modal-card');
+  if (!card || card._swipeBound) return;
+  card._swipeBound = true;
+  let startY = 0, dy = 0, dragging = false;
+
+  card.addEventListener('touchstart', (e) => {
+    const r = card.getBoundingClientRect();
+    // Only start the drag from the handle area (top 60 px). Below that,
+    // touches scroll the modal content.
+    if (e.touches[0].clientY - r.top > 60) return;
+    dragging = true;
+    startY = e.touches[0].clientY;
+    dy = 0;
+    card.style.transition = 'none';
+  }, { passive: true });
+
+  card.addEventListener('touchmove', (e) => {
+    if (!dragging) return;
+    dy = Math.max(0, e.touches[0].clientY - startY);
+    card.style.transform = `translateY(${dy}px)`;
+    // Fade the backdrop opacity as the card moves.
+    const modal = document.getElementById('citation-modal');
+    if (modal) modal.style.opacity = String(Math.max(0.3, 1 - dy / 400));
+  }, { passive: true });
+
+  card.addEventListener('touchend', () => {
+    if (!dragging) return;
+    dragging = false;
+    card.style.transition = 'transform 200ms ease-out';
+    const modal = document.getElementById('citation-modal');
+    if (dy > 120) {
+      if (modal) modal.hidden = true;
+    }
+    card.style.transform = '';
+    if (modal) modal.style.opacity = '';
+    dy = 0;
+  });
+}
+// Bind once on script load — modal element exists at DOM-ready time.
+if (document.readyState !== 'loading') _bindModalSwipe();
+else document.addEventListener('DOMContentLoaded', _bindModalSwipe);
+
+// ── Duplicate-label detection → Merge-button hi-vis (Phase 6) ──────────
+// Called after each successful _extractGraph. Cheap O(n²) Jaccard on
+// lowercased token sets — at our typical 10–40-node graph the work
+// is negligible (<1 ms). Toggles .has-duplicates on the Merge button so
+// users get a visual nudge when the graph has obvious dupes.
+function _detectAndFlagDuplicates() {
+  const btn = document.getElementById('graph-merge-btn');
+  if (!btn) return;
+  let labels;
+  try { labels = KGraph.exportJSON().nodes.map((n) => n.label); }
+  catch (_) { return; }
+  if (!labels || labels.length < 2) {
+    btn.classList.remove('has-duplicates');
+    return;
+  }
+  // Token sets for Jaccard
+  const tokens = labels.map((l) => new Set(
+    l.toLowerCase().replace(/[^a-z0-9\s-]/g, ' ').split(/\s+/).filter(Boolean)
+  ));
+  const jacc = (a, b) => {
+    if (a.size === 0 || b.size === 0) return 0;
+    let inter = 0;
+    for (const t of a) if (b.has(t)) inter++;
+    return inter / (a.size + b.size - inter);
+  };
+  let found = false;
+  outer: for (let i = 0; i < tokens.length; i++) {
+    for (let j = i + 1; j < tokens.length; j++) {
+      if (jacc(tokens[i], tokens[j]) >= 0.7) { found = true; break outer; }
+    }
+  }
+  btn.classList.toggle('has-duplicates', found);
 }
 
 // Read an SSE response that emits a single final `{ok, payload|error}`
