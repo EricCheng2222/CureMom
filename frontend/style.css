@@ -1,64 +1,171 @@
 /* ── Reset & tokens ──────────────────────────────────────────────────────── */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+/* Light is the default; dark overrides via @media (prefers-color-scheme: dark)
+ * below. Every legacy variable name (--bg, --text-2, --indigo, --node-*, etc.)
+ * is preserved so `graph.js` (which reads node-* via getComputedStyle once)
+ * + all existing CSS rules still resolve. */
 :root {
   --font: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  color-scheme: light dark;
 
-  /* Brand — tuned for dark mode */
-  --indigo:   #818CF8;
-  --indigo-d: #6366F1;
-  --indigo-soft: rgba(129,140,248,.14);
-  --green:    #34D399;
-  --green-d:  #10B981;
-  --green-soft: rgba(52,211,153,.14);
+  /* ── Brand accents ───────────────────────────── */
+  --indigo:      #4F46E5;
+  --indigo-d:    #4338CA;
+  --indigo-soft: rgba(79,70,229,.10);
+  --green:       #059669;
+  --green-d:     #047857;
+  --green-soft:  rgba(5,150,105,.10);
+  --accent:        var(--indigo);
+  --accent-hover:  var(--indigo-d);
+  --accent-active: #3730A3;
+  --accent-subtle: var(--indigo-soft);
+  --accent-border: rgba(79,70,229,.30);
 
-  /* Surfaces (dark) */
-  --bg:        #0A0E1A;          /* page background */
-  --bg-2:      #0F1424;          /* sidebar / panels */
-  --surface:   #131A2C;          /* cards, raised */
-  --surface-2: #1A2237;          /* hover / focused */
-  --surface-3: #232C45;          /* deepest hover */
+  /* ── Surfaces (light) ────────────────────────── */
+  --bg:        #FFFFFF;
+  --bg-2:      #F8FAFC;
+  --surface:   #FFFFFF;
+  --surface-2: #F1F5F9;
+  --surface-3: #E2E8F0;
+  --bg-canvas:    var(--bg);
+  --bg-elevated:  var(--bg-2);
 
-  /* Borders */
-  --border:        rgba(255,255,255,.07);
-  --border-2:      rgba(255,255,255,.11);
-  --border-strong: rgba(255,255,255,.18);
+  /* ── Borders ─────────────────────────────────── */
+  --border:        #E2E8F0;
+  --border-2:      #CBD5E1;
+  --border-strong: #94A3B8;
 
-  /* Text */
-  --text:    #F1F5F9;
-  --text-2:  rgba(255,255,255,.78);
-  --text-3:  rgba(255,255,255,.62);
-  --muted:   rgba(255,255,255,.42);
-  --dim:     rgba(255,255,255,.28);
+  /* ── Text scale ──────────────────────────────── */
+  --text:    #0F172A;
+  --text-2:  #334155;
+  --text-3:  #475569;
+  --muted:   #64748B;
+  --dim:     #94A3B8;
+  --text-primary:   var(--text);
+  --text-secondary: var(--text-2);
+  --text-tertiary:  var(--text-3);
+  --text-muted:     var(--muted);
 
-  /* Semantic */
-  --red:   #F87171;
-  --amber: #FBBF24;
+  /* ── Status ──────────────────────────────────── */
+  --red:   #DC2626;
+  --amber: #D97706;
 
-  /* Knowledge-graph node-type colors */
-  --node-chemical: #34D399;     /* drugs / chemicals — green */
-  --node-disease:  #F87171;     /* diseases — red */
-  --node-gene:     #818CF8;     /* genes / proteins — indigo */
-  --node-anatomy:  #FBBF24;     /* anatomy / tissues — amber */
-  --node-symptom:  #FB7185;     /* symptoms — rose */
-  --node-procedure:#A78BFA;     /* procedures — violet */
-  --node-default:  #94A3B8;     /* other — slate */
+  /* ── Knowledge-graph node colors ─────────────── */
+  /* `graph.js` reads these once via getComputedStyle on init. Picked so
+   * the same hue reads on white AND dark backgrounds. */
+  --node-chemical: #10B981;     /* drugs / chemicals — emerald */
+  --node-disease:  #EF4444;     /* diseases — red */
+  --node-gene:     #6366F1;     /* genes / proteins — indigo */
+  --node-anatomy:  #F59E0B;     /* anatomy / tissues — amber */
+  --node-symptom:  #EC4899;     /* symptoms — pink */
+  --node-procedure:#8B5CF6;     /* procedures — violet */
+  --node-default:  #64748B;     /* other — slate */
 
+  /* ── Geometry ────────────────────────────────── */
   --radius-sm: 8px;
   --radius:    12px;
   --radius-lg: 18px;
   --radius-xl: 24px;
+  --tap-min:   44px;            /* minimum tap target (Apple HIG) */
 
-  --shadow-sm: 0 1px 3px rgba(0,0,0,.4), 0 4px 12px rgba(0,0,0,.25);
-  --shadow-md: 0 4px 16px rgba(0,0,0,.4);
-  --shadow-lg: 0 12px 40px rgba(0,0,0,.55);
+  /* ── Shadows (light) ─────────────────────────── */
+  --shadow-sm: 0 1px 2px rgba(15,23,42,.06), 0 1px 3px rgba(15,23,42,.08);
+  --shadow-md: 0 4px 12px rgba(15,23,42,.08), 0 2px 4px rgba(15,23,42,.06);
+  --shadow-lg: 0 20px 40px rgba(15,23,42,.12), 0 8px 16px rgba(15,23,42,.08);
+
+  /* ── Landing gradient + on-gradient text (theme-aware) ── */
+  --landing-bg: linear-gradient(160deg, #F8FAFC 0%, #EEF2FF 40%, #ECFEFF 70%, #F8FAFC 100%);
+  --landing-orb-1: rgba(99,102,241,.18);
+  --landing-orb-2: rgba(5,150,105,.14);
+  --landing-orb-3: rgba(99,102,241,.10);
+  --landing-text:       #0F172A;
+  --landing-text-muted: #475569;
+  --landing-text-dim:   #64748B;
+  --landing-card-bg:    rgba(255,255,255,.7);
+  --landing-card-bg-hover: rgba(255,255,255,.92);
+  --landing-card-border:   rgba(15,23,42,.10);
+  --landing-card-border-hover: rgba(15,23,42,.20);
+  --landing-status-dot: rgba(15,23,42,.30);
+
+  /* ── Type scale (clamp-based, scales with viewport) ── */
+  --fs-xs: clamp(11px, 0.75rem + .1vw, 12px);
+  --fs-sm: clamp(12px, 0.8rem + .15vw, 13.5px);
+  --fs-md: clamp(14px, 0.9rem + .2vw, 15.5px);
+  --fs-lg: clamp(16px, 1rem + .35vw, 18px);
+  --fs-xl: clamp(20px, 1.3rem + .8vw, 26px);
+  --fs-h1: clamp(28px, 2rem + 2vw, 54px);
 
   font-family: var(--font);
   font-size: 15px;
   line-height: 1.6;
   color: var(--text);
   -webkit-font-smoothing: antialiased;
-  color-scheme: dark;
+}
+
+/* Dark mode override — preserves the original palette exactly. Only the
+ * variables that differ from light are restated here. Order: anything
+ * that's "the same color in both themes" lives in :root only. */
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+
+    --indigo:      #818CF8;
+    --indigo-d:    #6366F1;
+    --indigo-soft: rgba(129,140,248,.14);
+    --green:       #34D399;
+    --green-d:     #10B981;
+    --green-soft:  rgba(52,211,153,.14);
+    --accent:        var(--indigo);
+    --accent-hover:  var(--indigo-d);
+    --accent-active: #4F46E5;
+    --accent-subtle: var(--indigo-soft);
+    --accent-border: rgba(129,140,248,.30);
+
+    --bg:        #0A0E1A;
+    --bg-2:      #0F1424;
+    --surface:   #131A2C;
+    --surface-2: #1A2237;
+    --surface-3: #232C45;
+
+    --border:        rgba(255,255,255,.07);
+    --border-2:      rgba(255,255,255,.11);
+    --border-strong: rgba(255,255,255,.18);
+
+    --text:    #F1F5F9;
+    --text-2:  rgba(255,255,255,.78);
+    --text-3:  rgba(255,255,255,.62);
+    --muted:   rgba(255,255,255,.42);
+    --dim:     rgba(255,255,255,.28);
+
+    --red:   #F87171;
+    --amber: #FBBF24;
+
+    --node-chemical: #34D399;
+    --node-disease:  #F87171;
+    --node-gene:     #818CF8;
+    --node-anatomy:  #FBBF24;
+    --node-symptom:  #FB7185;
+    --node-procedure:#A78BFA;
+    --node-default:  #94A3B8;
+
+    --shadow-sm: 0 1px 3px rgba(0,0,0,.4), 0 4px 12px rgba(0,0,0,.25);
+    --shadow-md: 0 4px 16px rgba(0,0,0,.4);
+    --shadow-lg: 0 12px 40px rgba(0,0,0,.55);
+
+    --landing-bg: linear-gradient(160deg, #060B18 0%, #0D1829 40%, #0B1E35 70%, #0A1628 100%);
+    --landing-orb-1: rgba(99,102,241,.18);
+    --landing-orb-2: rgba(16,185,129,.12);
+    --landing-orb-3: rgba(99,102,241,.10);
+    --landing-text:       #F1F5F9;
+    --landing-text-muted: rgba(255,255,255,.55);
+    --landing-text-dim:   rgba(255,255,255,.45);
+    --landing-card-bg:    rgba(255,255,255,.05);
+    --landing-card-bg-hover: rgba(255,255,255,.09);
+    --landing-card-border:   rgba(255,255,255,.1);
+    --landing-card-border-hover: rgba(255,255,255,.2);
+    --landing-status-dot: rgba(255,255,255,.3);
+  }
 }
 
 html, body { height: 100%; overflow: hidden; background: var(--bg); }
@@ -72,7 +179,7 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); }
 /* ═══════════════════════════════════════════════════════════ LANDING ══════ */
 #view-landing {
   position: relative;
-  background: linear-gradient(160deg, #060B18 0%, #0D1829 40%, #0B1E35 70%, #0A1628 100%);
+  background: var(--landing-bg);
   overflow: hidden;
   align-items: center;
   justify-content: center;
@@ -80,9 +187,9 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); }
 
 .land-bg { position: absolute; inset: 0; pointer-events: none; z-index: 0; }
 .land-orb { position: absolute; border-radius: 50%; filter: blur(80px); pointer-events: none; }
-.land-orb1 { width: 600px; height: 600px; background: rgba(99,102,241,.18);  top: -100px; left: -80px; }
-.land-orb2 { width: 500px; height: 500px; background: rgba(16,185,129,.12);  bottom: -60px; right: -40px; }
-.land-orb3 { width: 300px; height: 300px; background: rgba(99,102,241,.10);  top: 40%; left: 55%; }
+.land-orb1 { width: 600px; height: 600px; background: var(--landing-orb-1);  top: -100px; left: -80px; }
+.land-orb2 { width: 500px; height: 500px; background: var(--landing-orb-2);  bottom: -60px; right: -40px; }
+.land-orb3 { width: 300px; height: 300px; background: var(--landing-orb-3);  top: 40%; left: 55%; }
 
 .land-nav {
   position: absolute;
@@ -105,13 +212,13 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); }
 .land-status { display: flex; align-items: center; gap: 7px; }
 .status-dot {
   width: 7px; height: 7px; border-radius: 50%;
-  background: rgba(255,255,255,.3);
+  background: var(--landing-status-dot);
   transition: background .3s, box-shadow .3s;
 }
 .status-dot.ok   { background: var(--green); box-shadow: 0 0 8px var(--green); }
 .status-dot.warn { background: var(--amber); }
 .status-dot.err  { background: var(--red); }
-.status-text { font-size: 13px; color: rgba(255,255,255,.45); }
+.status-text { font-size: 13px; color: var(--landing-text-dim); }
 
 .land-hero {
   position: relative;
@@ -129,10 +236,10 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); }
   display: inline-flex; align-items: center; gap: 6px;
   font-size: 11px; font-weight: 600;
   letter-spacing: .8px; text-transform: uppercase;
-  color: rgba(255,255,255,.5);
-  border: 1px solid rgba(255,255,255,.12);
+  color: var(--landing-text-dim);
+  border: 1px solid var(--landing-card-border);
   border-radius: 99px; padding: 5px 14px;
-  background: rgba(255,255,255,.04);
+  background: var(--landing-card-bg);
 }
 
 .land-h1 {
@@ -140,15 +247,15 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); }
   font-weight: 800;
   line-height: 1.1;
   letter-spacing: -1.5px;
-  color: white;
+  color: var(--landing-text);
 }
 .land-h1-accent {
-  background: linear-gradient(90deg, #818CF8, #34D399);
+  background: linear-gradient(90deg, var(--indigo), var(--green));
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
 }
-.land-sub { font-size: 16px; color: rgba(255,255,255,.5); line-height: 1.7; }
+.land-sub { font-size: 16px; color: var(--landing-text-muted); line-height: 1.7; }
 
 .land-cards {
   display: grid;
@@ -160,13 +267,13 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); }
 @media (max-width: 620px) { .land-cards { grid-template-columns: 1fr; } }
 
 .land-card {
-  background: rgba(255,255,255,.05);
-  border: 1px solid rgba(255,255,255,.1);
+  background: var(--landing-card-bg);
+  border: 1px solid var(--landing-card-border);
   border-radius: var(--radius-xl);
   padding: 28px 26px;
   text-align: left;
   cursor: pointer;
-  color: white;
+  color: var(--landing-text);
   font-family: var(--font);
   transition: background .2s, border-color .2s, transform .2s;
   display: flex;
@@ -175,25 +282,29 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); }
   position: relative;
   overflow: hidden;
 }
-.land-card:hover { background: rgba(255,255,255,.09); border-color: rgba(255,255,255,.2); transform: translateY(-3px); }
+.land-card:hover {
+  background: var(--landing-card-bg-hover);
+  border-color: var(--landing-card-border-hover);
+  transform: translateY(-3px);
+}
 
 .land-card-icon {
   width: 46px; height: 46px;
   border-radius: var(--radius);
   display: flex; align-items: center; justify-content: center;
 }
-.patient-icon { background: rgba(99,102,241,.2);  color: #A5B4FC; }
-.pro-icon     { background: rgba(16,185,129,.2);  color: #6EE7B7; }
+.patient-icon { background: rgba(99,102,241,.2);  color: var(--indigo); }
+.pro-icon     { background: rgba(16,185,129,.2);  color: var(--green); }
 
 .land-card-label { font-size: 17px; font-weight: 700; letter-spacing: -.3px; }
-.land-card-desc  { font-size: 13px; color: rgba(255,255,255,.55); line-height: 1.6; }
+.land-card-desc  { font-size: 13px; color: var(--landing-text-muted); line-height: 1.6; }
 .land-card-chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .land-card-chips span {
   font-size: 11px; padding: 3px 9px; border-radius: 99px;
-  background: rgba(255,255,255,.07); color: rgba(255,255,255,.6);
+  background: var(--landing-card-bg-hover); color: var(--landing-text-muted);
   font-weight: 500;
 }
-.land-card-arrow { font-size: 13px; font-weight: 600; color: rgba(255,255,255,.7); margin-top: 4px; }
+.land-card-arrow { font-size: 13px; font-weight: 600; color: var(--landing-text-muted); margin-top: 4px; }
 
 /* ═══════════════════════════════════════════════════════ APP SHELL ══════ */
 .app-shell {
@@ -972,8 +1083,8 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); }
 /* ═══════════════════════════════════════════════════════ SCROLLBAR ══════ */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: rgba(255,255,255,.08); border-radius: 99px; }
-::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,.18); }
+::-webkit-scrollbar-thumb { background: var(--border-2); border-radius: 99px; }
+::-webkit-scrollbar-thumb:hover { background: var(--border-strong); }
 
 /* ═══════════════════════════════════════════════ KNOWLEDGE GRAPH PANEL ══ */
 .graph-panel {
