@@ -239,12 +239,74 @@ async function populateProviderDropdowns() {
     // option, else extractive.
     const def = [...sel.options].find(o => o.dataset.isDefault === '1');
     if (def) sel.value = def.value;
+
+    // Bind mobile bottom-sheet picker. On phones, intercept the select's
+    // native picker and show our themed sheet instead.
+    _bindProviderSheet(sel);
   }
   console.log('[providers] dropdown populated');
 }
 populateProviderDropdowns().catch(err => {
   console.error('[providers] populate failed:', err);
 });
+
+// ── Mobile bottom-sheet provider picker (Phase 5) ───────────────────────
+// On phones (≤700 px), tapping a provider <select> opens a styled
+// bottom sheet instead of the native picker. The selected option is
+// mirrored back into the hidden <select> so existing code that reads
+// `consumer-provider.value` works without any change. Desktop is
+// untouched — pointer events bypass the interceptor at >700 px.
+function _bindProviderSheet(selectEl) {
+  if (!selectEl || selectEl._sheetBound) return;
+  selectEl._sheetBound = true;
+  // mousedown fires BEFORE the native picker opens, so we preventDefault
+  // here and route to our sheet. iOS Safari + Chrome both honor this.
+  selectEl.addEventListener('mousedown', (e) => {
+    if (!matchMedia('(max-width: 700px)').matches) return;
+    e.preventDefault();
+    openProviderSheet(selectEl);
+  });
+  // Keyboard focus still opens the native picker on desktop (good); on
+  // phone, also intercept keyboard activation:
+  selectEl.addEventListener('keydown', (e) => {
+    if (!matchMedia('(max-width: 700px)').matches) return;
+    if (e.key === 'Enter' || e.key === ' ' || e.key === 'ArrowDown') {
+      e.preventDefault();
+      openProviderSheet(selectEl);
+    }
+  });
+}
+
+function openProviderSheet(selectEl) {
+  const sheet = document.getElementById('provider-sheet');
+  const list  = document.getElementById('provider-sheet-list');
+  if (!sheet || !list) return;
+  sheet._target = selectEl;
+  list.innerHTML = [...selectEl.options].map((o) => {
+    const sel = o.value === selectEl.value ? ' sel' : '';
+    return `<li><button class="sheet-opt${sel}" type="button" data-v="${escapeHtml(o.value)}">${escapeHtml(o.textContent)}</button></li>`;
+  }).join('');
+  list.onclick = (e) => {
+    const btn = e.target.closest('.sheet-opt');
+    if (!btn) return;
+    selectEl.value = btn.dataset.v;
+    selectEl.dispatchEvent(new Event('change', { bubbles: true }));
+    closeProviderSheet();
+  };
+  sheet.hidden = false;
+  // Two-frame delay so the slide-in transition triggers (initial paint
+  // sets transform:translateY(100%); class flip then animates to 0).
+  requestAnimationFrame(() => requestAnimationFrame(() => sheet.classList.add('open')));
+}
+
+function closeProviderSheet() {
+  const sheet = document.getElementById('provider-sheet');
+  if (!sheet) return;
+  sheet.classList.remove('open');
+  setTimeout(() => { sheet.hidden = true; }, 240);
+}
+
+window.closeProviderSheet = closeProviderSheet;   // for inline onclick
 
 // Validate any stored key + reveal the Share section if so.
 _refreshAuthState();

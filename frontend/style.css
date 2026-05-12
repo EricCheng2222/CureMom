@@ -1326,6 +1326,93 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); }
   .skel-node, .skel-edges { animation: none; }
 }
 
+/* ── Bottom sheet — mobile provider picker (Phase 5) ───
+ * A backdrop + slide-up panel that overlays the page. Triggered by
+ * openProviderSheet(selectEl). Hidden via [hidden] when not in use. */
+.sheet {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+.sheet[hidden] { display: none; }
+.sheet-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(15, 23, 42, .45);
+  opacity: 0;
+  transition: opacity .22s ease-out;
+}
+.sheet.open .sheet-backdrop { opacity: 1; }
+.sheet-panel {
+  position: relative;
+  width: 100%;
+  max-width: 560px;
+  background: var(--bg-elevated);
+  border-radius: 18px 18px 0 0;
+  box-shadow: var(--shadow-lg);
+  padding: 0 0 max(12px, env(safe-area-inset-bottom)) 0;
+  transform: translateY(100%);
+  transition: transform .22s ease-out;
+}
+.sheet.open .sheet-panel { transform: translateY(0); }
+.sheet-drag-handle {
+  width: 40px;
+  height: 4px;
+  border-radius: 99px;
+  background: var(--border-2);
+  margin: 8px auto 4px;
+}
+.sheet-title {
+  font-size: 13px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .8px;
+  color: var(--text-tertiary);
+  padding: 4px 20px 12px;
+  border-bottom: 1px solid var(--border);
+}
+#provider-sheet-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px 8px 4px;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+.sheet-opt {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: var(--tap-min);
+  padding: 10px 14px;
+  background: transparent;
+  border: none;
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 15px;
+  text-align: left;
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: background .12s;
+}
+.sheet-opt:hover, .sheet-opt:focus-visible { background: var(--surface-2); outline: none; }
+.sheet-opt.sel {
+  color: var(--accent);
+  font-weight: 600;
+  background: var(--accent-subtle);
+}
+.sheet-opt.sel::after {
+  content: "";
+  width: 16px; height: 16px;
+  background: var(--accent);
+  -webkit-mask: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path d="M3 8.5l3.2 3.2L13 5" stroke="black" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>') no-repeat center / contain;
+          mask: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path d="M3 8.5l3.2 3.2L13 5" stroke="black" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>') no-repeat center / contain;
+}
+
 .graph-legend {
   display: flex;
   flex-wrap: wrap;
