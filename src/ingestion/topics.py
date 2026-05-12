@@ -257,9 +257,9 @@ TOPICS: list[IngestionTopic] = [
     # — we filter to RCTs + reviews + meta-analyses to keep it tractable.
 
     IngestionTopic(
-        name="phototherapy_clinical",
-        mesh_query='"Phototherapy"[MeSH] AND ("Randomized Controlled Trial"[Publication Type] OR "Meta-Analysis"[Publication Type] OR "Systematic Review"[Publication Type] OR "Practice Guideline"[Publication Type])',
-        description="Clinical phototherapy — UV for psoriasis/vitiligo/eczema, bright light for SAD, blue light for jaundice (RCTs + reviews)",
+        name="phototherapy_core",
+        mesh_query='"Phototherapy"[MeSH]',
+        description="Phototherapy (broad MeSH) — UV for psoriasis/vitiligo/eczema, bright light for SAD, blue light for neonatal jaundice, all evidence levels",
         priority=1,
     ),
     IngestionTopic(
