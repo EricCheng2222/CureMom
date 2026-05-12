@@ -718,27 +718,13 @@ function _showGraphSpinner(show) {
 }
 
 // Skeleton shimmer over the canvas while the LLM is generating relations.
-// Rendered into .graph-canvas-wrap once; hidden via [hidden] thereafter.
-function _showGraphSkeleton(show) {
-  const wrap = document.querySelector('.graph-canvas-wrap');
-  if (!wrap) return;
-  let el = document.getElementById('graph-skeleton');
-  if (!el && show) {
-    el = document.createElement('div');
-    el.id = 'graph-skeleton';
-    el.className = 'graph-skeleton';
-    el.innerHTML =
-      Array.from({ length: 6 }, (_, i) => `<span class="skel-node n${i}"></span>`).join('') +
-      '<svg class="skel-edges" viewBox="0 0 400 300" preserveAspectRatio="none">' +
-        '<path d="M 90 70 Q 200 130 240 130 T 310 80"/>' +
-        '<path d="M 240 130 Q 200 200 130 200"/>' +
-        '<path d="M 130 200 Q 220 240 290 220"/>' +
-        '<path d="M 90 70 Q 160 60 220 50"/>' +
-      '</svg>';
-    wrap.appendChild(el);
-  }
-  if (el) el.hidden = !show;
-}
+// (Disabled — user feedback "remove the shadow graph". The graph-spinner
+// pill in the top-right of the panel is enough of a "working" signal.
+// Function kept as a no-op stub so call-sites don't 500.)
+function _showGraphSkeleton(_show) { /* intentionally no-op */ }
+// If a previous session rendered the overlay, evict it on load so a
+// stale element doesn't linger across the cache-bust boundary.
+document.getElementById('graph-skeleton')?.remove();
 
 // Clean the assistant response into prose suitable for graph extraction.
 // Same idea as pushAssistantToHistory but kept local so we can call it
