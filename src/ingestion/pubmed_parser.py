@@ -392,17 +392,53 @@ def parse_pubmed_article(article_xml_bytes: bytes) -> ParsedPaper | None:
 
 
 def parse_pubmed_xml_batch(xml_bytes: bytes) -> list[ParsedPaper]:
-    """Parse a full EFetch XML response containing multiple PubmedArticle elements."""
+    """Parse a full EFetch XML response containing multiple PubmedArticle elements.
+
+    NOTE: kept for backwards-compat. Use parse_pubmed_xml_batch_with_skipped()
+    if you also need to know which PMIDs were valid PubMed entries but weren't
+    journal articles (book/monograph/etc.) — the pipeline uses that to mark
+    them as 'skipped' instead of 'error'.
+    """
+    articles, _ = parse_pubmed_xml_batch_with_skipped(xml_bytes)
+    return articles
+
+
+def parse_pubmed_xml_batch_with_skipped(
+    xml_bytes: bytes,
+) -> tuple[list[ParsedPaper], list[str]]:
+    """Parse an EFetch batch response.
+
+    Returns (parsed_articles, skipped_pmids) where skipped_pmids carries the
+    PMIDs of NCBI entries we deliberately skip — `<PubmedBookArticle>`
+    (CADTH / gov-agency monographs, NCBI Bookshelf entries) is the common
+    case. The pipeline distinguishes this from "PMID truly missing from the
+    response" so book entries don't pollute the error counter or get
+    retried forever.
+    """
     try:
         root = etree.fromstring(xml_bytes)
     except etree.XMLSyntaxError as exc:
         raise ValueError(f"Malformed PubMed XML: {exc}") from exc
 
-    articles = root.findall("PubmedArticle") if root.tag == "PubmedArticleSet" else [root]
+    if root.tag == "PubmedArticleSet":
+        article_children = list(root)  # all children, regardless of tag
+    else:
+        article_children = [root]
+
     results: list[ParsedPaper] = []
-    for article_el in articles:
-        raw = etree.tostring(article_el)
-        paper = parse_pubmed_article(raw)
-        if paper is not None:
-            results.append(paper)
-    return results
+    skipped: list[str] = []
+    for child in article_children:
+        if child.tag == "PubmedArticle":
+            raw = etree.tostring(child)
+            paper = parse_pubmed_article(raw)
+            if paper is not None:
+                results.append(paper)
+            # If parse returned None for a PubmedArticle the data was malformed
+            # — let it fall through to "not returned" in the pipeline.
+        elif child.tag == "PubmedBookArticle":
+            # NCBI Bookshelf entry (gov agency report, monograph, etc.).
+            # Pull the PMID so the pipeline can mark it 'skipped' cleanly.
+            pmid_el = child.find(".//PMID")
+            if pmid_el is not None and pmid_el.text:
+                skipped.append(pmid_el.text.strip())
+    return results, skipped

@@ -293,8 +293,14 @@ def efetch_batch(
     client: httpx.Client,
     config: PipelineConfig,
     pmids: list[str],
-) -> list[ParsedPaper]:
-    """Fetch and parse a batch of papers from EFetch."""
+) -> tuple[list[ParsedPaper], list[str]]:
+    """Fetch and parse a batch of papers from EFetch.
+
+    Returns (parsed_articles, skipped_book_pmids). Skipped PMIDs are valid
+    PubMed entries that aren't journal articles (NCBI Bookshelf monographs,
+    gov-agency reports). The caller marks those with status='skipped' so
+    they don't sit in the retry queue or inflate the error counter.
+    """
     params = {
         **config.ncbi_params(),
         "db": "pubmed",
@@ -304,7 +310,8 @@ def efetch_batch(
     }
     config.throttle()
     xml_bytes = _ncbi_get(client, EFETCH_URL, params)
-    return parse_pubmed_xml_batch(xml_bytes)
+    from .pubmed_parser import parse_pubmed_xml_batch_with_skipped
+    return parse_pubmed_xml_batch_with_skipped(xml_bytes)
 
 
 def _queue_new_pmids(conn: psycopg.Connection, pmids: list[str]) -> int:
@@ -541,6 +548,22 @@ def _mark_error(conn: psycopg.Connection, pmid: str, message: str) -> None:
     conn.commit()
 
 
+def _mark_skipped(conn: psycopg.Connection, pmid: str, reason: str) -> None:
+    """Terminal state for PMIDs that aren't journal articles — NCBI Bookshelf
+    monographs, gov-agency reports, etc. Distinct from 'error' so they don't
+    get retried and don't pollute the error counter."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE ingestion_log
+            SET status = 'skipped', error_message = %s, indexed_at = NOW()
+            WHERE pmid = %s
+            """,
+            (reason[:2000], pmid),
+        )
+    conn.commit()
+
+
 def _index_paper_to_es(es: "Elasticsearch", paper: ParsedPaper, journal_title: str | None) -> None:
     """Index a single paper to Elasticsearch. Errors are logged, not raised."""
     try:
@@ -631,10 +654,11 @@ def run_ingestion(
         # Phase 2: Fetch and parse queued papers
         total_done = 0
         total_error = 0
+        total_skipped = 0
         for pmid_batch in _iter_queued_pmids(conn):
             logger.info("Fetching batch of %d PMIDs", len(pmid_batch))
             try:
-                papers = efetch_batch(client, config, pmid_batch)
+                papers, skipped_pmids = efetch_batch(client, config, pmid_batch)
             except Exception as exc:
                 logger.error("EFetch failed for batch: %s", exc)
                 for pmid in pmid_batch:
@@ -643,6 +667,7 @@ def run_ingestion(
                 continue
 
             fetched_pmids = {p.pmid for p in papers}
+            skipped_pmids_set = set(skipped_pmids)
             for paper in papers:
                 try:
                     with conn.transaction():
@@ -663,12 +688,20 @@ def run_ingestion(
                     _mark_error(conn, paper.pmid, str(exc))
                     total_error += 1
 
-            # Mark any PMIDs that EFetch didn't return (NCBI removed or non-article)
+            # Mark book/monograph entries as 'skipped' — not retryable, not
+            # counted as errors. PMIDs truly missing from the response (NCBI
+            # deleted, transient drop) stay as 'error' so a future re-run picks
+            # them up.
+            for pmid in skipped_pmids_set:
+                _mark_skipped(conn, pmid, "not a journal article (book/monograph)")
+                total_skipped += 1
+
             for pmid in pmid_batch:
-                if pmid not in fetched_pmids:
+                if pmid not in fetched_pmids and pmid not in skipped_pmids_set:
                     _mark_error(conn, pmid, "not returned by EFetch")
                     total_error += 1
 
-        logger.info("Ingestion complete. Done: %d, Errors: %d", total_done, total_error)
+        logger.info("Ingestion complete. Done: %d, Skipped: %d, Errors: %d",
+                    total_done, total_skipped, total_error)
 
     conn.close()

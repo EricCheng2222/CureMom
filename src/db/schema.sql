@@ -234,7 +234,9 @@ CREATE INDEX idx_entity_graph_b ON entity_graph (entity_b);
 
 CREATE TYPE ingestion_status AS ENUM (
     'queued', 'fetching', 'fetched', 'parsing', 'parsed',
-    'embedding', 'indexed', 'done', 'error', 'retraction'
+    'embedding', 'indexed', 'done', 'error', 'retraction',
+    'skipped'    -- valid PubMed entry but not a journal article
+                 -- (book/monograph/gov-agency report) — terminal, no retry
 );
 
 CREATE TABLE ingestion_log (
