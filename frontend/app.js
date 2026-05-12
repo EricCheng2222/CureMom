@@ -447,6 +447,63 @@ function _isGraphPanelOpen() {
   return panel && !panel.classList.contains('collapsed');
 }
 
+// ── Mobile tab swap (Phase 2 + 3) ───────────────────────────────────────
+// On phones (≤900 px CSS breakpoint), the .app-shell carries a
+// data-mobile-tab attribute that flips which panel is visible. The
+// bottom-nav buttons call this. Desktop ignores it (CSS only reacts
+// at ≤900 px).
+function setMobileTab(tab) {
+  const shell = document.querySelector('#view-consumer .app-shell');
+  if (!shell) return;
+  const next = tab === 'graph' ? 'graph' : 'chat';
+  if (shell.dataset.mobileTab === next) return;
+
+  const swap = () => {
+    shell.dataset.mobileTab = next;
+    document.querySelectorAll('#view-consumer .bn-btn').forEach((b) => {
+      b.setAttribute('aria-selected', b.dataset.tab === next ? 'true' : 'false');
+    });
+    if (next === 'graph') {
+      ensureGraphInit();
+      // Cytoscape needs a resize + fit after its container becomes visible.
+      setTimeout(() => {
+        try { KGraph.resize(); KGraph.fit(); } catch (_) { /* not yet inited */ }
+      }, 60);
+    } else {
+      _hidePopover?.();
+    }
+    // Clear the unread-count badge whenever the graph tab is visited.
+    if (next === 'graph') {
+      const badge = document.getElementById('bn-graph-badge');
+      if (badge) { badge.hidden = true; badge.textContent = '0'; }
+    }
+  };
+
+  // Smoother transition via View Transitions API where supported.
+  if (document.startViewTransition && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    document.startViewTransition(swap);
+  } else {
+    swap();
+  }
+}
+
+// Bump the bottom-nav badge when new graph content arrives while the
+// user is on the chat tab. Called from _extractGraph after a successful
+// merge. No-op on desktop (where both panels are always visible).
+function _bumpGraphBadge(added) {
+  if (!added) return;
+  const shell = document.querySelector('#view-consumer .app-shell');
+  const badge = document.getElementById('bn-graph-badge');
+  if (!shell || !badge) return;
+  if (shell.dataset.mobileTab === 'graph') return;   // already viewing
+  if (!matchMedia('(max-width: 900px)').matches) return;
+  const cur = parseInt(badge.textContent || '0', 10) || 0;
+  badge.textContent = String(cur + added);
+  badge.hidden = false;
+}
+
+window.setMobileTab = setMobileTab;   // expose for inline onclick
+
 function _refreshGraphChrome(overrideStatus) {
   if (!_graphInitialized) return;
   const { nodes, edges } = KGraph.size();
@@ -615,6 +672,7 @@ async function _extractGraph(query, response, citations) {
     }
     const result = KGraph.merge(payload);
     console.log('[KGraph] merged —', result.addedNodes.length, 'new nodes,', result.addedEdges.length, 'new edges');
+    _bumpGraphBadge(result.addedNodes.length);   // bottom-nav badge on mobile when user is on chat tab
     // Partial payload: graph built from a truncated LLM input or output.
     // Surface the specific reason in the graph chrome (input vs output is
     // actionable — input truncation means shorten the question; output

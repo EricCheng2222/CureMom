@@ -1534,11 +1534,11 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); }
 
 /* ═══════════════════════════════════════════════════════ RESPONSIVE ══════ */
 
-/* Phone-sized: hide everything but chat */
+/* Phone-sized: sidebar replaced by bottom-nav (defined below). Graph
+   visibility is no longer hard-hidden — the new tab-swap logic uses
+   [data-mobile-tab] on .app-shell to flip between chat and graph. */
 @media (max-width: 700px) {
-  .sidebar { display: none; }
   .land-h1 { letter-spacing: -.8px; }
-  .graph-panel { display: none !important; }
 }
 
 /* iPad portrait + landscape (700-1180px): keep sidebar but tighten the
@@ -1585,5 +1585,101 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); }
 @media (hover: none) {
   *:hover { transition: none; }
   button { -webkit-tap-highlight-color: transparent; }
+}
+
+/* ── Mobile bottom nav + tab swap (Phase 2 + 3) ──────────────────────────
+ * On phones the sidebar disappears and the bottom-nav takes over for
+ * Chat ↔ Graph navigation. The .app-shell carries data-mobile-tab="chat"
+ * or "graph"; CSS picks which panel is visible. Desktop unchanged: bottom
+ * nav hidden, sidebar + split-pane returns. */
+.bottom-nav { display: none; }   /* hidden by default; shown ≤900 px below */
+
+@media (max-width: 900px) {
+  .app-shell {
+    flex-direction: column;
+    height: 100dvh;
+  }
+  .sidebar { display: none; }
+  .chat-area, .graph-panel { flex: 1 1 auto; min-height: 0; width: 100%; }
+
+  /* Tab swap — only one panel visible at a time on phone. !important
+   * beats both .graph-panel.collapsed (set by desktop toggleGraphPanel)
+   * and the legacy <700px rule's force-hide. */
+  .app-shell[data-mobile-tab="chat"]  .graph-panel { display: none !important; }
+  .app-shell[data-mobile-tab="graph"] .chat-area   { display: none !important; }
+  .app-shell[data-mobile-tab="graph"] .graph-panel,
+  .app-shell[data-mobile-tab="graph"] .graph-panel.collapsed {
+    display: flex !important;
+  }
+
+  /* Desktop graph-toggle button is redundant on phone (bottom nav owns it) */
+  .topbar-graph-btn { display: none; }
+
+  /* Bottom nav itself */
+  .bottom-nav {
+    display: flex;
+    flex: 0 0 auto;
+    gap: 4px;
+    padding: 6px 8px;
+    padding-bottom: max(6px, env(safe-area-inset-bottom));
+    background: var(--bg-elevated);
+    border-top: 1px solid var(--border);
+    z-index: 50;
+  }
+  .bn-btn {
+    flex: 1;
+    min-height: var(--tap-min);
+    display: inline-flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    padding: 6px 8px;
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    font-family: var(--font);
+    font-size: 11px;
+    font-weight: 600;
+    border-radius: var(--radius);
+    cursor: pointer;
+    position: relative;
+    transition: color .15s, background .15s;
+  }
+  .bn-btn svg { width: 22px; height: 22px; }
+  .bn-btn[aria-selected="true"] {
+    color: var(--accent);
+    background: var(--accent-subtle);
+  }
+  .bn-btn:active { background: var(--surface-2); }
+  .bn-badge {
+    position: absolute;
+    top: 2px; right: 8px;
+    background: var(--red);
+    color: #fff;
+    font-size: 9px;
+    font-weight: 700;
+    border-radius: 99px;
+    padding: 1px 5px;
+    min-width: 16px;
+    text-align: center;
+    line-height: 1.2;
+  }
+}
+
+/* Tablet+ landing tap targets (≥481 px): keep landing-card 2-up.
+ * Already handled by the .land-cards 1fr 1fr default + 620 px override. */
+
+/* View-transition slide for mobile tab swap. The .app-shell animates the
+ * active panel's `slide-in` whenever data-mobile-tab changes. Falls back
+ * to a no-op outside startViewTransition because we set the data attr
+ * via JS atomically. prefers-reduced-motion respected. */
+@media (max-width: 900px) and (prefers-reduced-motion: no-preference) {
+  .app-shell[data-mobile-tab="chat"]  .chat-area   { animation: shellSlideIn .18s ease-out; }
+  .app-shell[data-mobile-tab="graph"] .graph-panel { animation: shellSlideIn .18s ease-out; }
+  @keyframes shellSlideIn {
+    from { opacity: 0; transform: translateX(8px); }
+    to   { opacity: 1; transform: translateX(0); }
+  }
 }
 
