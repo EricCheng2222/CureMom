@@ -1863,13 +1863,18 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); }
     min-height: 0;
   }
   .sidebar { display: none; }
-  /* min-height:0 lets the inner .messages scroll instead of the entire
-   * chat-area growing past the column's allocated space (which would
-   * break scrolling — content "stuck" beyond the screen edge). */
-  .chat-area, .graph-panel { flex: 1 1 auto; min-height: 0; width: 100%; height: 100%; }
-  .chat-area  { display: flex; flex-direction: column; min-height: 0; }
-  .graph-panel { min-height: 0; }
-  .messages { min-height: 0; }
+  /* In a flex column with bottom-nav, the chat/graph panel takes the
+   * remaining space via `flex: 1 1 auto` + `min-height: 0`. Do NOT add
+   * `height: 100%` here — that would force the panel to the full
+   * .app-shell height and push the bottom-nav off-screen. min-height:0
+   * is the standard idiom: lets the inner .messages handle the overflow
+   * scroll instead of the parent growing past its allocated space. */
+  .chat-area, .graph-panel { flex: 1 1 auto; min-height: 0; width: 100%; }
+  .chat-area  { display: flex; flex-direction: column; }
+  .messages { min-height: 0; flex: 1 1 auto; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+  /* Make sure the chat-input-bar + chat-disclaimer don't shrink so the
+   * keyboard-open state on iOS keeps them visible. */
+  .chat-input-bar, .chat-disclaimer { flex-shrink: 0; }
 
   /* Tab swap — only one panel visible at a time on phone. !important
    * beats both .graph-panel.collapsed (set by desktop toggleGraphPanel)
